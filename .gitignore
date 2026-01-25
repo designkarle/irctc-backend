@@ -1,0 +1,167 @@
+# ==========================================
+# IRCTC Backend - Git Ignore Configuration
+# ==========================================
+
+# ============ Environment Variables ============
+# NEVER commit these files - they contain secrets!
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+*.env
+
+# Instead I am providing you .env.example (Use your values and you are all set)
+
+# ============ Dependencies ============
+# Node.js dependencies (can be reinstalled with npm install)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Package manager lock files (optional - some teams commit these)
+# Uncomment if you want to ignore them
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# I am providing you package-lock.json and package.json
+
+
+# ============ Build & Dist ============
+# Compiled output directories
+dist/
+build/
+out/
+.next/
+.nuxt/
+*.tsbuildinfo
+
+# ============ Logs ============
+# Application and system logs
+logs/
+*.log
+log/
+*.log.*
+combined.log
+error.log
+access.log
+
+# ============ IDE & Editors ============
+# VS Code
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+.vscode/.ropeproject
+
+# WebStorm / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# ============ Operating System ============
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+
+# ============ Testing ============
+# Test coverage reports
+coverage/
+.nyc_output/
+*.lcov
+.coverage
+htmlcov/
+junit.xml
+
+# ============ Database ============
+# Local database files
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# PostgreSQL dumps
+*.sql
+*.dump
+
+# ============ Docker ============
+# Docker volumes and data (managed by docker-compose)
+# Only ignore if you don't want to track docker data
+# Comment out if you need to track specific docker configs
+*.env.docker
+docker-compose.override.yml
+
+# ============ Temporary Files ============
+# Temporary and cache directories
+tmp/
+temp/
+.cache/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ============ Security & Credentials ============
+# Private keys and certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+
+# Secrets and credentials
+secrets/
+credentials/
+.secrets
+serviceAccountKey.json
+
+# ============ Prisma ============
+# Prisma migrations (optional - some teams commit these)
+# Uncomment if you want to ignore migration files
+# prisma/migrations/
+
+# ============ Miscellaneous ============
+# Yarn
+.yarn-integrity
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# npm
+.npm
+
+# ESLint cache
+.eslintcache
+
+# Prettier
+.prettierignore
+
+# Turborepo cache
+.turbo
+
+# ============ Service-Specific ============
+# Add service-specific ignores here if needed
+# user-service/uploads/
+# booking-service/temp/
