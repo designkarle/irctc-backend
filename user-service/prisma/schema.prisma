@@ -13,13 +13,31 @@ datasource db {
   provider = "postgresql"
 }
 
-model User{
-  id String @id @default(uuid())
-  firstName String
-  lastName String
-  email String @unique
-  password String?
-  emailVerified Boolean @default(false)
+model User {
+  id            String   @id @default(uuid())
+  firstName     String
+  lastName      String
+  email         String   @unique
+  password      String?
+  emailVerified Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  AuthProviders AuthProvider[]
+}
+
+model AuthProvider {
+  id         String @id @default(uuid())
+  provider   String
+  providerId String
+  userId     String
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@unique([userId, provider])
+  @@index([userId])
 }

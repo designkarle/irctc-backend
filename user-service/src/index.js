@@ -7,14 +7,17 @@ const logger = require('./config/logger');
 
 const authRoutes = require('./routes/auth.route');
 
-const {corsMiddleware} = require('./middlewares/cors.middleware');
+const { corsMiddleware } = require('./middlewares/cors.middleware');
 const errorHandler = require('./middlewares/error.middleware');
-const {reqLogger} = require('./middlewares/req.middleware');
+const { reqLogger } = require('./middlewares/req.middleware');
 
 const app = express();
 
-app.use(helmet());
 app.use(corsMiddleware);
+app.use(helmet({
+     crossOriginOpenerPolicy: false,
+     crossOriginEmbedderPolicy: false,
+}));
 app.use(reqLogger);
 app.use(express.json());
 app.use(cookieParser());
@@ -39,7 +42,7 @@ const startServer = async () => {
                     `${config.SERVICE_NAME} is running on http://localhost:${config.PORT}`
                );
           })
-     }catch(error){
+     } catch (error) {
           logger.error("Failed to Start Server", error);
           process.exit(1);
      }
