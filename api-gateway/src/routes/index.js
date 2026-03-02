@@ -58,6 +58,50 @@ router.get(
 )
 
 
+const adminServiceProxy = createProxy('adminService', config.SERVICES.ADMIN_SERVICE_URL);
+
+router.post(
+     '/admins/stations/station',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+);
+
+router.post(
+     '/admins/trains/train',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+);
+
+router.post(
+     '/admins/trains/route',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+)
+
+router.post(
+     '/admins/schedules/schedule',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+)
+
+router.get(
+     '/admins/stations/station',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+)
+
+router.get(
+     '/admins/trains/train/:trainId',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+);
+
 // Gateway Health Status
 
 router.get('/gateway/health', (req, res) => {

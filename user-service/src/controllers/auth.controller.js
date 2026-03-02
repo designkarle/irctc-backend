@@ -3,10 +3,6 @@ const asyncHandler = require('../utils/asyncHandler');
 const {config} = require('../config');
 const authService = require('../services/auth.service');
 const getDeviceFingerprint = require("../utils/deviceFingerPrint");
-const logger = require("../config/logger");
-const { http } = require("winston");
-const prisma = require('../config/prisma');
-const { generateRefreshToken } = require("../utils/auth");
 
 exports.sendOTP = asyncHandler(async(req, res) =>{
      const {firstName, lastName, email, password, confirmPassword} = req.body;
