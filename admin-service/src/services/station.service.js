@@ -63,39 +63,5 @@ const getStationById = async (stationId) => {
      return station;
 };
 
-const updateStation = async (stationId, data) => {
-     const station = await prisma.station.findUnique({
-          where: { id: stationId }
-     });
 
-     if (!station) {
-          throw new NotFoundError('Station not found');
-     }
-
-     const updated = await prisma.station.update({
-          where: { id: stationId },
-          data
-     });
-
-     logger.info('Station updated', { stationId });
-     return updated;
-};
-
-const deleteStation = async (stationId) => {
-     const station = await prisma.station.findUnique({
-          where: { id: stationId }
-     });
-
-     if (!station) {
-          throw new NotFoundError('Station not found');
-     }
-
-     await prisma.station.delete({
-          where: { id: stationId }
-     });
-
-     logger.info('Station deleted', { stationId });
-};
-
-
-module.exports = { createStation, getAllStations, getStationById, updateStation, deleteStation };
+module.exports = { createStation, getAllStations, getStationById };

@@ -102,6 +102,12 @@ router.get(
      adminServiceProxy
 );
 
+router.put(
+     '/admins/schedules/schedule/:scheduleId',
+     requireAuth,
+     combinedRateLimit(),
+     adminServiceProxy
+)
 // Gateway Health Status
 
 router.get('/gateway/health', (req, res) => {

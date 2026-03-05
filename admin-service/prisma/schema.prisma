@@ -33,7 +33,7 @@ model Train {
   id          String   @id @default(uuid())
   trainNumber String   @unique // "12301"
   trainName   String // "Rajdhani Express"
-  coachName   String   @default("GEN") // Single coach per train (simplified)
+  coachName   String   @default("AC") // Single coach per train (simplified)
   totalSeats  Int // Total seats in the single coach
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -81,7 +81,7 @@ model RouteStation {
   routeId            String
   stationId          String
   sequenceNumber     Int // 1, 2, 3... order of station in route
-  arrivalTime        String? // "06:00" (null for first station)
+  arrivalTime        String? // "06:00"
   departureTime      String? // "06:10" (null for last station)
   distanceFromOrigin Float   @default(0) // in km, for pricing calculation
 

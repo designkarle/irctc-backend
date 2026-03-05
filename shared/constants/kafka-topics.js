@@ -17,7 +17,7 @@ const KAFKA_TOPICS = {
      TRAIN_UPDATED: 'admin.train-updated',
      STATION_UPDATED: 'admin.station-updated',
      ROUTE_UPDATED: 'admin.route-updated',
-     SCHEDULE_UPDATED: 'admin.schedule-updated',
+     SCHEDULE_CANCELLED: 'admin.schedule-cancelled',
 
      // Inventory topics (inventory-service -> search-service)
      SEAT_AVAILABILITY_UPDATED: 'inventory.seat-availability-updated',

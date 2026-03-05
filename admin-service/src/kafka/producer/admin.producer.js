@@ -66,7 +66,7 @@ class AdminProducer {
      async publishScheduleCreated(scheduleData) {
           return this.sendMessage(
                KAFKA_TOPICS.SCHEDULE_CREATED,
-               `schedule-${scheduleData.id}`,
+               `schedule-${scheduleData.scheduleId}`,
                scheduleData
           );
      }

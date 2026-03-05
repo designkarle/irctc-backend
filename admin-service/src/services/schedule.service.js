@@ -75,4 +75,44 @@ const createSchedule = async (data) => {
 }
 
 
-module.exports = { createSchedule };
+const getAllSchedules = async (query = {}) => {
+     const where = {};
+     if (query.trainId) where.trainId = query.trainId;
+     if (query.status) where.status = query.status;
+     if (query.date) where.departureDate = new Date(query.date);
+
+     return prisma.schedule.findMany({
+          where,
+          include: {
+               train: {
+                    include: {
+                         route: {
+                              include: {
+                                   routeStations: {
+                                        include: { station: true },
+                                        orderBy: { sequenceNumber: 'asc' },
+                                   },
+                              },
+                         },
+                    },
+               },
+          },
+          orderBy: { departureDate: 'asc' },
+     });
+};
+
+
+const cancelSchedule = async (scheduleId) => {
+     const schedule = await prisma.schedule.findUnique({ where: { id: scheduleId } });
+     if (!schedule) throw new NotFoundError('Schedule not found');
+
+     const updated = await prisma.schedule.update({
+          where: { id: scheduleId },
+          data: { status: 'CANCELLED' },
+     });
+
+     await adminProducer.publishScheduleCancelled(updated);
+     return updated;
+};
+
+module.exports = { createSchedule, getAllSchedules, cancelSchedule };

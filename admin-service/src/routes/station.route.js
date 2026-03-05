@@ -8,7 +8,5 @@ const router = express.Router();
 router.get("/station", getUserContext, getAllStations);
 router.get("/station/:stationId", getUserContext, getStationById);
 router.post("/station", getUserContext, createStation);
-router.put("/station", getUserContext, updateStation);
-router.delete("/station", getUserContext, deleteStation);
 
 module.exports = router;
