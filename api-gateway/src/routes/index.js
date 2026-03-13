@@ -108,6 +108,23 @@ router.put(
      combinedRateLimit(),
      adminServiceProxy
 )
+// ===========================
+// SEARCH SERVICE ROUTES (public - no auth required)
+// ===========================
+const searchServiceProxy = createProxy('searchService', config.SERVICES.SEARCH_SERVICE_URL);
+
+router.get(
+     '/search/trains',
+     endpointRateLimit(60, 60000), // 60 requests per minute
+     searchServiceProxy
+);
+
+router.get(
+     '/search/autocomplete',
+     endpointRateLimit(120, 60000), // 120 requests per minute
+     searchServiceProxy
+);
+
 // Gateway Health Status
 
 router.get('/gateway/health', (req, res) => {

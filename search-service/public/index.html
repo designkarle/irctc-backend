@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRCTC Train Search</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f4f8; color: #1a1a2e; min-height: 100vh; }
+
+        .header {
+            background: linear-gradient(135deg, #1a237e, #283593);
+            color: #fff;
+            padding: 20px 0;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        .header h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: 1px; }
+        .header p { font-size: 0.9rem; opacity: 0.85; margin-top: 4px; }
+
+        .banner {
+            background: #fff3e0;
+            border-left: 4px solid #f57c00;
+            padding: 10px 20px;
+            margin: 20px auto;
+            max-width: 800px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: #e65100;
+        }
+
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+
+        .search-card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 28px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+        }
+
+        .form-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+        .input-group { flex: 1; min-width: 200px; position: relative; }
+        .input-group label { display: block; font-size: 0.8rem; font-weight: 600; color: #555; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .input-group input {
+            width: 100%;
+            padding: 10px 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: border-color 0.2s;
+            outline: none;
+        }
+        .input-group input:focus { border-color: #1a237e; }
+
+        .suggestions {
+            position: absolute;
+            top: 100%;
+            left: 0; right: 0;
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 0 0 8px 8px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 100;
+            display: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .suggestions.active { display: block; }
+        .suggestion-item {
+            padding: 10px 14px;
+            cursor: pointer;
+            border-bottom: 1px solid #f5f5f5;
+            font-size: 0.9rem;
+            transition: background 0.15s;
+        }
+        .suggestion-item:hover { background: #e8eaf6; }
+        .suggestion-item .code { color: #888; font-size: 0.8rem; margin-left: 6px; }
+
+        .search-btn {
+            background: linear-gradient(135deg, #f57c00, #ef6c00);
+            color: #fff;
+            border: none;
+            padding: 12px 36px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.2s;
+            width: 100%;
+        }
+        .search-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(245,124,0,0.3); }
+        .search-btn:active { transform: translateY(0); }
+        .search-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+        .resolved-info {
+            background: #e8f5e9;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            font-size: 0.85rem;
+            color: #2e7d32;
+            display: none;
+        }
+        .resolved-info.active { display: block; }
+
+        .results-section { margin-top: 8px; }
+        .results-header { font-size: 1.1rem; font-weight: 600; margin-bottom: 12px; color: #333; }
+
+        .train-card {
+            background: #fff;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 14px;
+            box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+            border-left: 4px solid #1a237e;
+            transition: box-shadow 0.2s;
+        }
+        .train-card:hover { box-shadow: 0 3px 12px rgba(0,0,0,0.1); }
+
+        .train-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+        .train-name { font-size: 1.05rem; font-weight: 700; color: #1a237e; }
+        .train-number { font-size: 0.85rem; color: #777; background: #f5f5f5; padding: 3px 10px; border-radius: 12px; }
+
+        .train-route {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 14px;
+            padding: 12px 0;
+        }
+        .station-info { flex: 1; }
+        .station-name { font-size: 0.95rem; font-weight: 600; }
+        .station-code { font-size: 0.8rem; color: #888; }
+        .station-time { font-size: 1.1rem; font-weight: 700; color: #333; margin-top: 2px; }
+
+        .route-arrow {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #bbb;
+            font-size: 0.75rem;
+        }
+        .route-arrow .line { width: 60px; height: 2px; background: #ddd; margin: 4px 0; }
+
+        .train-meta { display: flex; gap: 12px; flex-wrap: wrap; }
+        .meta-badge {
+            font-size: 0.78rem;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: #f5f5f5;
+            color: #555;
+        }
+        .meta-badge.available { background: #e8f5e9; color: #2e7d32; }
+        .meta-badge.schedule { background: #e3f2fd; color: #1565c0; }
+
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-size: 0.95rem;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 30px;
+            color: #777;
+        }
+        .loading::after {
+            content: '';
+            display: inline-block;
+            width: 20px; height: 20px;
+            border: 3px solid #ddd;
+            border-top-color: #1a237e;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .error-msg { color: #c62828; background: #ffebee; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; }
+
+        @media (max-width: 600px) {
+            .form-row { flex-direction: column; }
+            .train-route { flex-direction: column; gap: 8px; text-align: center; }
+            .route-arrow .line { width: 2px; height: 30px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>IRCTC Train Search</h1>
+        <p>Find trains between stations with fuzzy search & autocomplete</p>
+    </div>
+
+    <div class="container">
+        <div class="banner">
+            Fuzzy search enabled — try typing <strong>"dehli"</strong> instead of "Delhi" or <strong>"mumbi"</strong> instead of "Mumbai". The search engine will still find the right station!
+        </div>
+
+        <div class="search-card">
+            <div class="form-row">
+                <div class="input-group">
+                    <label>From Station</label>
+                    <input id="from" type="text" placeholder="Type station name or code..." autocomplete="off">
+                    <div id="from-suggestions" class="suggestions"></div>
+                </div>
+                <div class="input-group">
+                    <label>To Station</label>
+                    <input id="to" type="text" placeholder="Type station name or code..." autocomplete="off">
+                    <div id="to-suggestions" class="suggestions"></div>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="input-group">
+                    <label>Travel Date (optional)</label>
+                    <input id="date" type="date">
+                </div>
+            </div>
+            <button id="search-btn" class="search-btn">Search Trains</button>
+        </div>
+
+        <div id="resolved-info" class="resolved-info"></div>
+        <div id="error" class="error-msg" style="display:none;"></div>
+        <div id="results" class="results-section"></div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        // ── Autocomplete ──
+        function setupAutocomplete(inputId, suggestionsId) {
+            const input = document.getElementById(inputId);
+            const sugBox = document.getElementById(suggestionsId);
+            let debounceTimer = null;
+
+            input.addEventListener('input', () => {
+                clearTimeout(debounceTimer);
+                const q = input.value.trim();
+                if (q.length < 2) { sugBox.classList.remove('active'); return; }
+
+                debounceTimer = setTimeout(async () => {
+                    try {
+                        const res = await fetch(`${API_BASE}/autocomplete?q=${encodeURIComponent(q)}`);
+                        const json = await res.json();
+                        if (!json.success || !json.data.length) { sugBox.classList.remove('active'); return; }
+
+                        sugBox.innerHTML = json.data.map(s =>
+                            `<div class="suggestion-item" data-name="${s.name}" data-code="${s.code}">
+                                ${s.name} <span class="code">(${s.code})</span>
+                            </div>`
+                        ).join('');
+                        sugBox.classList.add('active');
+
+                        sugBox.querySelectorAll('.suggestion-item').forEach(item => {
+                            item.addEventListener('click', () => {
+                                input.value = item.dataset.name;
+                                sugBox.classList.remove('active');
+                            });
+                        });
+                    } catch (err) {
+                        sugBox.classList.remove('active');
+                    }
+                }, 300);
+            });
+
+            // Close suggestions on click outside
+            document.addEventListener('click', (e) => {
+                if (!input.contains(e.target) && !sugBox.contains(e.target)) {
+                    sugBox.classList.remove('active');
+                }
+            });
+        }
+
+        setupAutocomplete('from', 'from-suggestions');
+        setupAutocomplete('to', 'to-suggestions');
+
+        // ── Search ──
+        const searchBtn = document.getElementById('search-btn');
+        const resultsDiv = document.getElementById('results');
+        const resolvedDiv = document.getElementById('resolved-info');
+        const errorDiv = document.getElementById('error');
+
+        searchBtn.addEventListener('click', async () => {
+            const from = document.getElementById('from').value.trim();
+            const to = document.getElementById('to').value.trim();
+            const date = document.getElementById('date').value;
+
+            if (!from || !to) {
+                showError('Please enter both From and To stations.');
+                return;
+            }
+
+            errorDiv.style.display = 'none';
+            resolvedDiv.classList.remove('active');
+            resultsDiv.innerHTML = '<div class="loading">Searching trains</div>';
+            searchBtn.disabled = true;
+
+            try {
+                let url = `${API_BASE}/trains?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+                if (date) url += `&date=${date}`;
+
+                const res = await fetch(url);
+                const json = await res.json();
+
+                if (!json.success) {
+                    showError(json.message || 'Search failed');
+                    resultsDiv.innerHTML = '';
+                    return;
+                }
+
+                const data = json.data;
+
+                // Show resolved station names (fuzzy match feedback)
+                if (data.from && data.to) {
+                    resolvedDiv.innerHTML = `Resolved: <strong>${from}</strong> &rarr; ${data.from.resolved} (${data.from.code}) &nbsp;|&nbsp; <strong>${to}</strong> &rarr; ${data.to.resolved} (${data.to.code})`;
+                    resolvedDiv.classList.add('active');
+                }
+
+                if (data.message && data.trains.length === 0) {
+                    resultsDiv.innerHTML = `<div class="no-results">${data.message}</div>`;
+                    return;
+                }
+
+                if (data.trains.length === 0) {
+                    resultsDiv.innerHTML = '<div class="no-results">No trains found for this route.</div>';
+                    return;
+                }
+
+                resultsDiv.innerHTML = `<div class="results-header">${data.count} train(s) found ${data.date !== 'any' ? 'on ' + data.date : ''}</div>` +
+                    data.trains.map(t => renderTrainCard(t)).join('');
+
+            } catch (err) {
+                showError('Network error. Make sure the search service is running.');
+                resultsDiv.innerHTML = '';
+            } finally {
+                searchBtn.disabled = false;
+            }
+        });
+
+        const searchedDate = () => document.getElementById('date').value;
+
+        function renderTrainCard(t) {
+            const seatBadges = Object.entries(t.seatSummary || {})
+                .filter(([k]) => k !== 'total')
+                .filter(([, v]) => v > 0)
+                .map(([k, v]) => `<span class="meta-badge">${formatSeatType(k)}: ${v}</span>`)
+                .join('');
+
+            let scheduleBadge = '';
+            if (t.schedule) {
+                scheduleBadge = `
+                    <span class="meta-badge schedule">Date: ${t.schedule.departureDate}</span>
+                    <span class="meta-badge available">Available: ${t.schedule.available}</span>
+                    <span class="meta-badge">Booked: ${t.schedule.booked}</span>
+                `;
+            } else if (searchedDate()) {
+                scheduleBadge = '<span class="meta-badge" style="background:#fff3e0;color:#e65100;">No schedule for this date</span>';
+            }
+
+            return `
+                <div class="train-card">
+                    <div class="train-header">
+                        <span class="train-name">${t.trainName}</span>
+                        <span class="train-number">#${t.trainNumber}</span>
+                    </div>
+                    <div class="train-route">
+                        <div class="station-info">
+                            <div class="station-name">${t.from.name}</div>
+                            <div class="station-code">${t.from.code}</div>
+                            <div class="station-time">${t.from.departure || '--:--'}</div>
+                        </div>
+                        <div class="route-arrow">
+                            <div class="line"></div>
+                        </div>
+                        <div class="station-info" style="text-align:right;">
+                            <div class="station-name">${t.to.name}</div>
+                            <div class="station-code">${t.to.code}</div>
+                            <div class="station-time">${t.to.arrival || '--:--'}</div>
+                        </div>
+                    </div>
+                    <div class="train-meta">
+                        <span class="meta-badge">Total Seats: ${t.seatSummary?.total || 0}</span>
+                        ${seatBadges}
+                        ${scheduleBadge}
+                    </div>
+                </div>
+            `;
+        }
+
+        function formatSeatType(type) {
+            return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+
+        function showError(msg) {
+            errorDiv.textContent = msg;
+            errorDiv.style.display = 'block';
+        }
+
+        // Allow Enter key to trigger search
+        document.querySelectorAll('#from, #to, #date').forEach(el => {
+            el.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') searchBtn.click();
+            });
+        });
+    </script>
+</body>
+</html>

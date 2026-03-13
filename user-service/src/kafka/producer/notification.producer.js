@@ -1,6 +1,6 @@
 const { producer, connectProducer } = require('../../config/kafka');
 const logger = require('../../config/logger');
-const { KAFKA_TOPICS, NOTIFICATION_TOPICS } = require('../../../../shared/constants/kafka-topics');
+const { KAFKA_TOPICS } = require('../../../../shared/constants/kafka-topics');
 
 class NotificationProducer {
      constructor() {

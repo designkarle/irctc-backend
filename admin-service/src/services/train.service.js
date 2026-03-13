@@ -97,7 +97,12 @@ const createRoute = async (data) => {
           },
      });
 
-     await adminProducer.publishRouteCreated(route);
+     const trainWithSeats = await prisma.train.findUnique({
+          where: { id: trainId },
+          include: { seats: { orderBy: { seatNumber: 'asc' } } },
+     });
+
+     await adminProducer.publishRouteCreated({ ...route, train: trainWithSeats });
      return route;
 };
 
