@@ -262,8 +262,9 @@ const searchTrains = async (from, to, date) => {
                     trainId: src.trainId,
                     trainNumber: src.trainNumber,
                     trainName: src.trainName,
-                    from: { name: fromHit.stationName, code: fromHit.stationCode, departure: fromHit.departureTime },
-                    to: { name: toHit.stationName, code: toHit.stationCode, arrival: toHit.arrivalTime },
+                    // --- SEGMENT BOOKING: Added stationId and sequenceNumber to from/to for segment-aware booking ---
+                    from: { name: fromHit.stationName, code: fromHit.stationCode, departure: fromHit.departureTime, stationId: fromHit.stationId, sequenceNumber: fromHit.sequenceNumber },
+                    to: { name: toHit.stationName, code: toHit.stationCode, arrival: toHit.arrivalTime, stationId: toHit.stationId, sequenceNumber: toHit.sequenceNumber },
                     seatSummary: src.seatSummary,
                     schedule: scheduleInfo,
                };
