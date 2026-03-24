@@ -125,6 +125,80 @@ router.get(
      searchServiceProxy
 );
 
+// ===========================
+// INVENTORY SERVICE ROUTES (public read-only)
+// ===========================
+const inventoryServiceProxy = createProxy('inventoryService', config.SERVICES.INVENTORY_SERVICE_URL);
+
+// Public: aggregate availability (used by search results)
+router.get(
+     '/inventory/schedules/:scheduleId/availability',
+     endpointRateLimit(120, 60000), // 120 requests per minute
+     inventoryServiceProxy
+);
+
+// Authenticated: individual seat statuses
+router.get(
+     '/inventory/schedules/:scheduleId/seats',
+     requireAuth,
+     combinedRateLimit(),
+     inventoryServiceProxy
+);
+
+// Note: lock/unlock/confirm/cancel-booking are now internal-only
+// (called by booking-service directly, not through the gateway)
+
+// ===========================
+// BOOKING SERVICE ROUTES
+// ===========================
+const bookingServiceProxy = createProxy('bookingService', config.SERVICES.BOOKING_SERVICE_URL);
+
+router.post(
+     '/bookings/bookings',
+     requireAuth,
+     endpointRateLimit(5, 60000), // 5 booking attempts per minute
+     bookingServiceProxy
+);
+
+router.get(
+     '/bookings/bookings',
+     requireAuth,
+     combinedRateLimit(),
+     bookingServiceProxy
+);
+
+router.get(
+     '/bookings/bookings/:bookingId',
+     requireAuth,
+     combinedRateLimit(),
+     bookingServiceProxy
+);
+
+router.post(
+     '/bookings/bookings/:bookingId/verify-payment',
+     requireAuth,
+     combinedRateLimit(),
+     bookingServiceProxy
+);
+
+router.post(
+     '/bookings/bookings/:bookingId/cancel',
+     requireAuth,
+     combinedRateLimit(),
+     bookingServiceProxy
+);
+
+// ===========================
+// PAYMENT SERVICE ROUTES (webhook only - public)
+// ===========================
+const paymentServiceProxy = createProxy('paymentService', config.SERVICES.PAYMENT_SERVICE_URL);
+
+// Razorpay webhook (public — no auth, signature-verified by payment-service)
+router.post(
+     '/payments/webhooks/razorpay',
+     paymentServiceProxy
+);
+
 // Gateway Health Status
 
 router.get('/gateway/health', (req, res) => {

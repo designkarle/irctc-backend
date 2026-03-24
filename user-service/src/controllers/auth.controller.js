@@ -4,6 +4,15 @@ const {config} = require('../config');
 const authService = require('../services/auth.service');
 const getDeviceFingerprint = require("../utils/deviceFingerPrint");
 
+const isProd = process.env.NODE_ENV === 'production';
+
+const cookieOptions = (maxAge) => ({
+     httpOnly: true,
+     secure: isProd,
+     sameSite: isProd ? 'strict' : 'lax',
+     maxAge,
+});
+
 exports.sendOTP = asyncHandler(async(req, res) =>{
      const {firstName, lastName, email, password, confirmPassword} = req.body;
      if(!firstName || !lastName || !email || !password || !confirmPassword){
@@ -15,12 +24,7 @@ exports.sendOTP = asyncHandler(async(req, res) =>{
      }
 
      const {otpSessionId} = await authService.sendOTP(firstName, lastName, email, password);
-     res.cookie("otp_session", otpSessionId, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.OTP_TTL * 1000
-     }).status(200).json({
+     res.cookie("otp_session", otpSessionId, cookieOptions(config.OTP_TTL * 1000)).status(200).json({
           success: true,
           message: "OTP sent successfully"
      })
@@ -51,18 +55,9 @@ exports.login = asyncHandler(async(req, res) =>{
      }
      const deviceId = getDeviceFingerprint(req);
      const {accessToken, refreshToken, loggedInUser} = await authService.login(email, password, deviceId);
-     res.cookie("accessToken", accessToken, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.ACCESS_TOKEN_EXP_SEC * 1000
-     })
-     res.cookie("refreshToken", refreshToken, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.REFRESH_TOKEN_EXP_SEC * 1000
-     }).status(200).json({
+     res.cookie("accessToken", accessToken, cookieOptions(config.ACCESS_TOKEN_EXP_SEC * 1000))
+     res.cookie("refreshToken", refreshToken, cookieOptions(config.REFRESH_TOKEN_EXP_SEC * 1000))
+     .status(200).json({
           success: true,
           message: "Logged in successfully",
           loggedInUser
@@ -76,18 +71,9 @@ exports.rotateRefreshToken = asyncHandler(async(req, res) =>{
      }
      const deviceId = getDeviceFingerprint(req);
      const {newAccessToken, newRefreshToken} = await authService.rotateRefreshToken(refreshToken, deviceId);
-     res.cookie("accessToken", newAccessToken, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.ACCESS_TOKEN_EXP_SEC * 1000
-     })
-     res.cookie("refreshToken", newRefreshToken, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.REFRESH_TOKEN_EXP_SEC * 1000
-     }).status(200).json({
+     res.cookie("accessToken", newAccessToken, cookieOptions(config.ACCESS_TOKEN_EXP_SEC * 1000))
+     res.cookie("refreshToken", newRefreshToken, cookieOptions(config.REFRESH_TOKEN_EXP_SEC * 1000))
+     .status(200).json({
           success: true,
           message: "Access and Refresh token reissued"
      })
@@ -104,18 +90,9 @@ exports.verifyGoogleIdToken = asyncHandler(async(req, res) =>{
      
      const {accessToken, refreshToken, loggedInUser} = await authService.verifyGoogleIdToken(idToken, deviceId);
      
-     res.cookie("accessToken", accessToken, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.ACCESS_TOKEN_EXP_SEC * 1000
-     })
-     res.cookie("refreshToken", refreshToken, {
-          httpOnly: true,
-          secure: true,
-          sameSite: "strict",
-          maxAge: config.REFRESH_TOKEN_EXP_SEC * 1000
-     }).status(200).json({
+     res.cookie("accessToken", accessToken, cookieOptions(config.ACCESS_TOKEN_EXP_SEC * 1000))
+     res.cookie("refreshToken", refreshToken, cookieOptions(config.REFRESH_TOKEN_EXP_SEC * 1000))
+     .status(200).json({
           success: true,
           message: "Logged in successfully",
           loggedInUser

@@ -20,7 +20,13 @@ app.use(helmet({
 }));
 app.use(reqLogger);
 
-app.use(express.json({ limit: '10mb' }));
+// Skip JSON parsing for Razorpay webhook — signature verification needs raw bytes
+app.use((req, res, next) => {
+     if (req.path === '/api/payments/webhooks/razorpay') {
+          return express.raw({ type: 'application/json', limit: '10mb' })(req, res, next);
+     }
+     express.json({ limit: '10mb' })(req, res, next);
+});
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 

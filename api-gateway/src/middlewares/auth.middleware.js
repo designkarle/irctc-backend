@@ -10,13 +10,18 @@ const logger = require('../config/logger');
  */
 function requireAuth(req, res, next) {
      try {
-          const authHeader = req.headers.authorization;
+          let accessToken;
 
-          if (!authHeader || !authHeader.startsWith('Bearer ')) {
-               throw new UnauthorizedError('Authorization token missing');
+          // 1. Try Authorization header (service-to-service / mobile clients)
+          const authHeader = req.headers.authorization;
+          if (authHeader && authHeader.startsWith('Bearer ')) {
+               accessToken = authHeader.split(' ')[1];
           }
 
-          const accessToken = authHeader.split(' ')[1];
+          // 2. Fall back to httpOnly cookie (browser clients)
+          if (!accessToken && req.cookies) {
+               accessToken = req.cookies.accessToken;
+          }
 
           if (!accessToken) {
                throw new UnauthorizedError('Authorization token missing');
