@@ -30,6 +30,18 @@ const KAFKA_TOPICS = {
      // Payment topics (payment-service -> booking-service)
      PAYMENT_SUCCESS: 'payment.success',
      PAYMENT_FAILED: 'payment.failed',
+
+     // Dead-letter queues (per service — poison messages land here)
+     DLQ_BOOKING: 'dlq.booking-service',
+     DLQ_INVENTORY: 'dlq.inventory-service',
+     DLQ_SEARCH: 'dlq.search-service',
+     DLQ_NOTIFICATION: 'dlq.notification-service',
 };
 
-module.exports = { KAFKA_TOPICS };
+/**
+ * Max retries before a consumer message is sent to the DLQ.
+ * After this many failures the message is considered poison.
+ */
+const DLQ_MAX_RETRIES = 3;
+
+module.exports = { KAFKA_TOPICS, DLQ_MAX_RETRIES };

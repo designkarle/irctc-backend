@@ -19,15 +19,34 @@ const consumer = kafka.consumer({
      heartbeatInterval: 3000,
 });
 
+// Producer (used only for DLQ publishing)
+const producer = kafka.producer({
+     allowAutoTopicCreation: true,
+     retry: { retries: 3 },
+});
+
+let isProducerConnected = false;
+
+const connectProducer = async () => {
+     if (!isProducerConnected) {
+          await producer.connect();
+          isProducerConnected = true;
+          logger.info('Kafka producer connected (DLQ)');
+     }
+};
 
 // Graceful shutdown
 const shutdown = async () => {
      logger.info('Shutting down Kafka connections...');
      await consumer.disconnect();
+     if (isProducerConnected) {
+          await producer.disconnect();
+          isProducerConnected = false;
+     }
      process.exit(0);
 };
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-module.exports = { kafka, consumer };
+module.exports = { kafka, consumer, producer, connectProducer };

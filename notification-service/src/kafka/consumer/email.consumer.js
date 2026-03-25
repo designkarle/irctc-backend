@@ -1,12 +1,15 @@
-const { consumer } = require('../../config/kafka');
+const { consumer, producer, connectProducer } = require('../../config/kafka');
 const emailService = require('../../services/email.service');
 const logger = require('../../config/logger');
 const { TOPICS } = require('../../utils/constants');
+const { KAFKA_TOPICS } = require('../../../../shared/constants/kafka-topics');
+const { withDLQ } = require('../../../../shared/utils/dlqHandler');
 
 class EmailConsumer {
      async start() {
           try {
                await consumer.connect();
+               await connectProducer(); // needed for DLQ publishing
                logger.info('Email consumer connected to Kafka');
 
                await consumer.subscribe({
@@ -15,30 +18,10 @@ class EmailConsumer {
                });
 
                await consumer.run({
-                    eachMessage: async ({ topic, partition, message }) => {
-                         try {
-                              const value = JSON.parse(message.value.toString());
-                              logger.info(`Processing message from topic: ${topic}`, {
-                                   partition,
-                                   offset: message.offset,
-                                   key: message.key?.toString(),
-                              });
-
-                              await this.handleMessage(topic, value);
-
-                         } catch (error) {
-                              logger.error('Error processing message', {
-                                   topic,
-                                   partition,
-                                   offset: message.offset,
-                                   error: error.message,
-                                   stack: error.stack,
-                              });
-
-                              // TODO: Send to dead letter queue for failed messages
-                              // await this.sendToDeadLetterQueue(topic, message, error);
-                         }
-                    },
+                    eachMessage: withDLQ(producer, KAFKA_TOPICS.DLQ_NOTIFICATION, logger, async ({ topic, parsedValue }) => {
+                         logger.info(`Processing message from topic: ${topic}`);
+                         await this.handleMessage(topic, parsedValue);
+                    }),
                });
 
                logger.info('Email consumer is running and listening for messages...');
