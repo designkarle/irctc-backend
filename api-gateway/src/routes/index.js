@@ -57,6 +57,19 @@ router.get(
      userServiceProxy
 )
 
+router.put(
+     '/users/user/profile',
+     requireAuth,
+     combinedRateLimit(),
+     userServiceProxy
+)
+
+router.delete(
+     '/users/user/profile',
+     requireAuth,
+     combinedRateLimit(),
+     userServiceProxy
+)
 
 const adminServiceProxy = createProxy('adminService', config.SERVICES.ADMIN_SERVICE_URL);
 
