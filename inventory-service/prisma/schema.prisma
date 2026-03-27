@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SeatStatus {
+  AVAILABLE
+  LOCKED
+  BOOKED
+  CANCELLED
+}
+
+model ScheduleInventory {
+  id            String   @id @default(uuid())
+  scheduleId    String   @unique
+  trainId       String
+  trainNumber   String
+  trainName     String
+  departureDate DateTime @db.Date
+  totalSeats    Int
+  available     Int
+  locked        Int      @default(0)
+  booked        Int      @default(0)
+  status        String   @default("ACTIVE")
+  version       Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  seats SeatInventory[]
+
+  @@index([trainId])
+  @@index([scheduleId, status])
+  @@index([departureDate])
+  @@map("schedule_inventories")
+}
+
+model SeatInventory {
+  id                  String     @id @default(uuid())
+  scheduleInventoryId String
+  scheduleId          String
+  seatId              String
+  seatNumber          Int
+  seatType            String
+  price               Float
+  status              SeatStatus @default(AVAILABLE)
+  lockedBy            String?
+  lockedAt            DateTime?
+  lockExpiresAt       DateTime?
+  bookingId           String?
+  version             Int        @default(0)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  scheduleInventory ScheduleInventory @relation(fields: [scheduleInventoryId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduleId, seatId])
+  @@unique([scheduleId, seatNumber])
+  @@index([scheduleId, status])
+  @@index([lockExpiresAt, status])
+  @@index([bookingId])
+  @@map("seat_inventories")
+}
+
+// --- SEGMENT BOOKING: Route topology per schedule ---
+// Stores the ordered list of stations for each schedule, populated from SCHEDULE_CREATED event.
+// Used to resolve station IDs to sequence numbers for segment overlap checks.
+model RouteStop {
+  id             String @id @default(uuid())
+  scheduleId     String
+  stationId      String
+  stationName    String
+  stationCode    String
+  sequenceNumber Int
+
+  @@unique([scheduleId, stationId])
+  @@unique([scheduleId, sequenceNumber])
+  @@index([scheduleId])
+  @@map("route_stops")
+}
+
+// --- SEGMENT BOOKING: Per-segment seat lock/booking tracking ---
+// Each row represents a seat locked or booked for a specific segment [fromSeq, toSeq).
+// Two segments overlap if: a.fromSeq < b.toSeq AND b.fromSeq < a.toSeq
+model SeatSegmentLock {
+  id            String     @id @default(uuid())
+  scheduleId    String
+  seatId        String
+  fromSeq       Int        // sequenceNumber of boarding station
+  toSeq         Int        // sequenceNumber of alighting station
+  status        SeatStatus @default(LOCKED)
+  lockedBy      String?
+  lockedAt      DateTime?
+  lockExpiresAt DateTime?
+  bookingId     String?
+  version       Int        @default(0)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([scheduleId, seatId])
+  @@index([scheduleId, seatId, status])
+  @@index([lockExpiresAt, status])
+  @@index([bookingId])
+  @@map("seat_segment_locks")
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(uuid())
+  eventKey    String   @unique
+  processedAt DateTime @default(now())
+
+  @@index([eventKey])
+  @@map("idempotency_records")
+}
