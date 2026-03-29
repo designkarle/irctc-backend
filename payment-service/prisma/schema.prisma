@@ -1,0 +1,95 @@
+generator client {
+  provider        = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PaymentOrderStatus {
+  CREATED
+  CAPTURED
+  FAILED
+  REFUND_INITIATED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum RefundStatus {
+  INITIATED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model PaymentOrder {
+  id               String             @id @default(uuid())
+  bookingId        String
+  userId           String
+  amount           Float
+  currency         String             @default("INR")
+  status           PaymentOrderStatus @default(CREATED)
+  idempotencyKey   String             @unique
+  gatewayProvider  String             @default("razorpay")
+  gatewayOrderId   String?            @unique
+  gatewayPaymentId String?            @unique
+  gatewaySignature String?
+  failureReason    String?
+  metadata         Json?
+  version          Int                @default(0)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  auditLogs PaymentAuditLog[]
+  refunds   Refund[]
+
+  @@index([bookingId])
+  @@index([userId])
+  @@index([status])
+  @@map("payment_orders")
+}
+
+model Refund {
+  id              String       @id @default(uuid())
+  paymentOrderId  String
+  amount          Float
+  reason          String?
+  status          RefundStatus @default(INITIATED)
+  idempotencyKey  String       @unique
+  gatewayRefundId String?      @unique
+  failureReason   String?
+  metadata        Json?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  paymentOrder PaymentOrder @relation(fields: [paymentOrderId], references: [id])
+
+  @@index([paymentOrderId])
+  @@index([status])
+  @@map("refunds")
+}
+
+model PaymentAuditLog {
+  id              String   @id @default(uuid())
+  paymentOrderId  String
+  action          String
+  gatewayResponse Json?
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  paymentOrder PaymentOrder @relation(fields: [paymentOrderId], references: [id])
+
+  @@index([paymentOrderId])
+  @@index([action])
+  @@map("payment_audit_logs")
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(uuid())
+  eventKey    String   @unique
+  response    Json?
+  processedAt DateTime @default(now())
+
+  @@index([eventKey])
+  @@map("idempotency_records")
+}

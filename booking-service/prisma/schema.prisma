@@ -1,0 +1,124 @@
+generator client {
+  provider        = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum BookingStatus {
+  PENDING
+  SEATS_HELD
+  PAYMENT_PENDING
+  CONFIRMING
+  CONFIRMED
+  CANCELLING
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum SagaStep {
+  HOLD_SEATS
+  CREATE_PAYMENT
+  CONFIRM_SEATS
+  COMPLETE
+}
+
+enum SagaStepStatus {
+  PENDING
+  COMPLETED
+  COMPENSATING
+  COMPENSATED
+  FAILED
+}
+
+model Booking {
+  id             String        @id @default(uuid())
+  userId         String
+  scheduleId     String
+  trainId        String
+  trainNumber    String
+  trainName      String
+  departureDate  DateTime      @db.Date
+  status         BookingStatus @default(PENDING)
+  totalAmount    Float         @default(0)
+  seatCount      Int
+  fromStationId  String?       // --- SEGMENT BOOKING: boarding station ID
+  toStationId    String?       // --- SEGMENT BOOKING: alighting station ID
+  fromSeq        Int?          // --- SEGMENT BOOKING: sequence number of boarding station
+  toSeq          Int?          // --- SEGMENT BOOKING: sequence number of alighting station
+  idempotencyKey String        @unique
+  paymentOrderId String?       @unique
+  lockExpiresAt  DateTime?
+  failureReason  String?
+  version        Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  seats      BookingSeat[]
+  passengers Passenger[]
+  sagaLog    SagaLog[]
+
+  @@index([userId])
+  @@index([scheduleId])
+  @@index([status])
+  @@index([lockExpiresAt, status])
+  @@map("bookings")
+}
+
+model BookingSeat {
+  id         String   @id @default(uuid())
+  bookingId  String
+  seatId     String
+  seatNumber Int
+  seatType   String
+  price      Float
+  createdAt  DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingId, seatId])
+  @@map("booking_seats")
+}
+
+model Passenger {
+  id        String   @id @default(uuid())
+  bookingId String
+  name      String
+  age       Int
+  gender    String
+  seatId    String?
+  createdAt DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("passengers")
+}
+
+model SagaLog {
+  id        String         @id @default(uuid())
+  bookingId String
+  step      SagaStep
+  status    SagaStepStatus @default(PENDING)
+  request   Json?
+  response  Json?
+  error     String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@map("saga_logs")
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(uuid())
+  eventKey    String   @unique
+  response    Json?
+  processedAt DateTime @default(now())
+
+  @@index([eventKey])
+  @@map("idempotency_records")
+}
