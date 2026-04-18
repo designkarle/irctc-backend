@@ -1,7 +1,7 @@
 const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { config } = require('../config');
-const { recountAndPublish } = require('../services/inventory.service');
+const { recountAndPublish, recomputeSegmentSeatStatuses } = require('../services/inventory.service');
 
 let intervalHandle = null;
 
@@ -65,20 +65,11 @@ async function cleanExpiredLocks() {
                     }
 
                     for (const [scheduleId, seatIdSet] of affectedScheduleSeats) {
-                         for (const seatId of seatIdSet) {
-                              const remaining = await prisma.seatSegmentLock.count({
-                                   where: { scheduleId, seatId, status: { in: ['LOCKED', 'BOOKED'] } },
-                              });
-                              if (remaining === 0) {
-                                   await prisma.$executeRaw`
-                                        UPDATE seat_inventories
-                                        SET status = 'AVAILABLE', "lockedBy" = NULL,
-                                            "lockedAt" = NULL, "lockExpiresAt" = NULL,
-                                            version = version + 1, "updatedAt" = NOW()
-                                        WHERE "scheduleId" = ${scheduleId} AND "seatId" = ${seatId} AND status = 'LOCKED'
-                                   `;
-                              }
-                         }
+                         // Recompute each seat's summary status from remaining segment locks.
+                         // This correctly handles all transitions: LOCKED→AVAILABLE, LOCKED→BOOKED, etc.
+                         await prisma.$transaction(async (tx) => {
+                              await recomputeSegmentSeatStatuses(tx, scheduleId, [...seatIdSet]);
+                         });
                          await recountAndPublish(scheduleId);
                     }
 

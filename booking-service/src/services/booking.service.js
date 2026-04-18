@@ -443,7 +443,23 @@ const cancelBooking = async (bookingId, userId) => {
 
      if (booking.status === 'CONFIRMED') {
           // Cancel confirmed booking: release seats + refund
-          await inventoryClient.cancelBooking(booking.scheduleId, booking.id, booking.userId);
+          try {
+               await inventoryClient.cancelBooking(booking.scheduleId, booking.id, booking.userId);
+          } catch (error) {
+               logger.error(`Failed to release seats in inventory for booking ${booking.id}`, {
+                    error: error.message,
+               });
+               // Roll back from CANCELLING to CONFIRMED so the user can retry
+               await prisma.booking.updateMany({
+                    where: { id: booking.id, status: 'CANCELLING' },
+                    data: {
+                         status: 'CONFIRMED',
+                         failureReason: null,
+                         version: { increment: 1 },
+                    },
+               });
+               throw error;
+          }
 
           if (booking.paymentOrderId) {
                try {

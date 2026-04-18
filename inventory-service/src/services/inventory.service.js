@@ -698,20 +698,9 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
 const cancelBooking = async (scheduleId, bookingId, userId) => {
      const result = await retryTransaction(async () => {
           return prisma.$transaction(async (tx) => {
-               const seats = await tx.$queryRaw`
-                    SELECT id, "seatId", "seatNumber", status, "lockedBy"
-                    FROM seat_inventories
-                    WHERE "scheduleId" = ${scheduleId}
-                    AND "bookingId" = ${bookingId}
-                    AND status = 'BOOKED'
-                    FOR UPDATE NOWAIT
-               `;
-
-               if (seats.length === 0) {
-                    throw new NotFoundError('No booked seats found for this booking');
-               }
-
-               // --- SEGMENT BOOKING: Remove segment locks for this booking ---
+               // --- SEGMENT BOOKING: Check segment locks FIRST ---
+               // For segment bookings, seat_inventories.bookingId is not set
+               // (only seat_segment_locks has the bookingId), so we must check here first.
                const segmentLocks = await tx.seatSegmentLock.findMany({
                     where: { scheduleId, bookingId, status: 'BOOKED' },
                });
@@ -741,6 +730,19 @@ const cancelBooking = async (scheduleId, bookingId, userId) => {
                // --- END SEGMENT BOOKING ---
 
                // Fallback: full-journey cancel (no segment locks found)
+               const seats = await tx.$queryRaw`
+                    SELECT id, "seatId", "seatNumber", status, "lockedBy"
+                    FROM seat_inventories
+                    WHERE "scheduleId" = ${scheduleId}
+                    AND "bookingId" = ${bookingId}
+                    AND status = 'BOOKED'
+                    FOR UPDATE NOWAIT
+               `;
+
+               if (seats.length === 0) {
+                    throw new NotFoundError('No booked seats found for this booking');
+               }
+
                const seatPkIds = seats.map(s => s.id);
                await tx.$executeRaw`
                     UPDATE seat_inventories
@@ -825,4 +827,5 @@ module.exports = {
      confirmSeats,
      cancelBooking,
      recountAndPublish,
+     recomputeSegmentSeatStatuses,
 };
