@@ -12,6 +12,8 @@ const config = {
      // Inter-service communication
      INVENTORY_SERVICE_URL: process.env.INVENTORY_SERVICE_URL || 'http://localhost:4007',
      PAYMENT_SERVICE_URL: process.env.PAYMENT_SERVICE_URL || 'http://localhost:4006',
+     USER_SERVICE_URL: process.env.USER_SERVICE_URL || 'http://localhost:4001',
+     ADMIN_SERVICE_URL: process.env.ADMIN_SERVICE_URL || 'http://localhost:4003',
      INTERNAL_SERVICE_KEY: process.env.INTERNAL_SERVICE_KEY,
 
      // Booking TTL

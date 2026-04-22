@@ -1,7 +1,14 @@
 const sgMail = require('@sendgrid/mail');
 const logger = require('../config/logger');
 const { config } = require('../config');
-const { getOtpTemplate, getWelcomeTemplate, getTicketConfirmationTemplate } = require('../templates');
+const {
+     getOtpTemplate,
+     getWelcomeTemplate,
+     getTicketConfirmationTemplate,
+     getBookingConfirmedTemplate,
+     getBookingFailedTemplate,
+     getBookingCancelledTemplate,
+} = require('../templates');
 
 sgMail.setApiKey(config.SENDGRID_API_KEY);
 
@@ -53,6 +60,39 @@ class EmailService {
                from: this.from,
                subject: 'Welcome to DesignKarle - Email Verified',
                html: getWelcomeTemplate(firstName),
+          };
+
+          return this.sendWithRetry(msg);
+     }
+
+     async sendBookingConfirmedEmail(email, bookingData) {
+          const msg = {
+               to: email,
+               from: this.from,
+               subject: `Booking Confirmed - ${bookingData.trainName || 'Your Train Ticket'}`,
+               html: getBookingConfirmedTemplate(bookingData),
+          };
+
+          return this.sendWithRetry(msg);
+     }
+
+     async sendBookingFailedEmail(email, bookingData) {
+          const msg = {
+               to: email,
+               from: this.from,
+               subject: 'Booking Unsuccessful - Please Try Again',
+               html: getBookingFailedTemplate(bookingData),
+          };
+
+          return this.sendWithRetry(msg);
+     }
+
+     async sendBookingCancelledEmail(email, bookingData) {
+          const msg = {
+               to: email,
+               from: this.from,
+               subject: 'Booking Cancelled - Refund Update',
+               html: getBookingCancelledTemplate(bookingData),
           };
 
           return this.sendWithRetry(msg);

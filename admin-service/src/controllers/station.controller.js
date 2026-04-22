@@ -56,3 +56,20 @@ exports.getStationById = asyncHandler(async (req, res) => {
           data: station
      });
 });
+
+exports.getStationByIdInternal = asyncHandler(async (req, res) => {
+     const { stationId } = req.params;
+     if(!stationId){
+          throw new BadRequestError("Station Id is missing");
+     }
+     const station = await stationService.getStationById(stationId);
+
+     res.status(200).json({
+          success: true,
+          data: station ? {
+               id: station.id,
+               name: station.name,
+               code: station.code,
+          } : null
+     });
+});

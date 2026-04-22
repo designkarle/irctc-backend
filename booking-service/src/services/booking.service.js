@@ -3,6 +3,8 @@ const logger = require('../config/logger');
 const { config } = require('../config');
 const { inventoryClient, extractError: extractInventoryError } = require('./inventoryClient');
 const { paymentClient, extractError: extractPaymentError } = require('./paymentClient');
+const { userClient } = require('./userClient');
+const { stationClient } = require('./stationClient');
 const { acquireSeatLocks, releaseSeatLocks, forceReleaseSeatLocks } = require('../utils/distributedLock');
 const saga = require('./saga.service');
 const bookingProducer = require('../kafka/producer/booking.producer');
@@ -22,6 +24,37 @@ const casUpdateBooking = async (bookingId, expectedVersion, data) => {
           throw new StaleStateError(
                `Booking ${bookingId} was modified by another process (expected version ${expectedVersion})`
           );
+     }
+};
+
+// ─── Notification Enrichment Helpers ─────────────────────────────────────────
+// Looks up user (and optionally stations) so booking events can carry email/firstName
+// directly. Failures here must never break the booking workflow — log and return null.
+
+const fetchUserForNotification = async (userId) => {
+     try {
+          const user = await userClient.getUserById(userId);
+          return user ? { email: user.email, firstName: user.firstName } : {};
+     } catch (err) {
+          logger.warn('Failed to enrich booking event with user details', {
+               userId,
+               error: err.message,
+          });
+          return {};
+     }
+};
+
+const fetchStationName = async (stationId) => {
+     if (!stationId) return null;
+     try {
+          const station = await stationClient.getStationById(stationId);
+          return station ? station.name : null;
+     } catch (err) {
+          logger.warn('Failed to enrich booking event with station name', {
+               stationId,
+               error: err.message,
+          });
+          return null;
      }
 };
 
@@ -276,12 +309,22 @@ const handlePaymentSuccess = async (paymentOrderId, gatewayPaymentId, amount) =>
 
           // Publish BOOKING_CONFIRMED (retried by producer — log but don't fail the booking)
           try {
+               const [userInfo, fromStationName, toStationName] = await Promise.all([
+                    fetchUserForNotification(booking.userId),
+                    fetchStationName(booking.fromStationId),
+                    fetchStationName(booking.toStationId),
+               ]);
+
                await bookingProducer.publishBookingConfirmed({
                     bookingId: booking.id,
                     userId: booking.userId,
+                    email: userInfo.email,
+                    firstName: userInfo.firstName,
                     scheduleId: booking.scheduleId,
                     trainNumber: booking.trainNumber,
                     trainName: booking.trainName,
+                    fromStationName,
+                    toStationName,
                     departureDate: booking.departureDate,
                     seats: booking.seats.map(s => ({
                          seatNumber: s.seatNumber,
@@ -328,9 +371,12 @@ const handlePaymentSuccess = async (paymentOrderId, gatewayPaymentId, amount) =>
           await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
 
           try {
+               const userInfo = await fetchUserForNotification(booking.userId);
                await bookingProducer.publishBookingFailed({
                     bookingId: booking.id,
                     userId: booking.userId,
+                    email: userInfo.email,
+                    firstName: userInfo.firstName,
                     scheduleId: booking.scheduleId,
                     reason: 'confirm_seats_failed',
                });
@@ -388,9 +434,12 @@ const handlePaymentFailure = async (paymentOrderId, reason) => {
 
      // Publish BOOKING_FAILED
      try {
+          const userInfo = await fetchUserForNotification(booking.userId);
           await bookingProducer.publishBookingFailed({
                bookingId: booking.id,
                userId: booking.userId,
+               email: userInfo.email,
+               firstName: userInfo.firstName,
                scheduleId: booking.scheduleId,
                reason: reason || 'payment_failed',
           });
@@ -501,9 +550,12 @@ const cancelBooking = async (bookingId, userId) => {
 
      // Publish BOOKING_CANCELLED
      try {
+          const userInfo = await fetchUserForNotification(booking.userId);
           await bookingProducer.publishBookingCancelled({
                bookingId: booking.id,
                userId: booking.userId,
+               email: userInfo.email,
+               firstName: userInfo.firstName,
                scheduleId: booking.scheduleId,
                reason: 'user_cancelled',
                refundAmount: refundInitiated ? booking.totalAmount : 0,
@@ -736,9 +788,12 @@ const handleScheduleCancelled = async (scheduleId) => {
 
                // Publish BOOKING_CANCELLED event
                try {
+                    const userInfo = await fetchUserForNotification(booking.userId);
                     await bookingProducer.publishBookingCancelled({
                          bookingId: booking.id,
                          userId: booking.userId,
+                         email: userInfo.email,
+                         firstName: userInfo.firstName,
                          scheduleId: booking.scheduleId,
                          reason: 'schedule_cancelled',
                          refundAmount: booking.status === 'CONFIRMED' ? booking.totalAmount : 0,

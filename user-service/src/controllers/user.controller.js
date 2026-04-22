@@ -1,5 +1,5 @@
 const asyncHandler = require("../utils/asyncHandler");
-const { BadRequestError } = require("../utils/error");
+const { BadRequestError, NotFoundError } = require("../utils/error");
 const userService = require('../services/user.service');
 const logger = require("../config/logger");
 
@@ -26,4 +26,26 @@ exports.updateProfile = asyncHandler(async(req, res) =>{
 
 exports.deleteProfile = asyncHandler(async(req, res) =>{
      // TODO TASK FOR YOU
+})
+
+exports.getUserInternal = asyncHandler(async(req, res) =>{
+     const { userId } = req.params;
+     if(!userId){
+          throw new BadRequestError("User Id is missing");
+     }
+
+     const user = await userService.getProfile(userId);
+     if(!user){
+          throw new NotFoundError("User not found");
+     }
+
+     return res.status(200).json({
+          success: true,
+          data: {
+               id: user.id,
+               firstName: user.firstName,
+               lastName: user.lastName,
+               email: user.email,
+          }
+     });
 })

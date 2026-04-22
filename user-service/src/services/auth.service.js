@@ -53,11 +53,17 @@ const login = async(email, password, deviceId) =>{
           where: {email}
      })
      if(!existingUser){
-          throw new BadRequestError("Email not found")
+          throw new UnauthorizedError("Invalid email or password", "INVALID_CREDENTIALS");
+     }
+     if(!existingUser.password){
+          throw new BadRequestError(
+               "This account was created with Google. Please sign in with Google.",
+               "OAUTH_ONLY_ACCOUNT"
+          );
      }
      const doesPasswordMatch = await bcrypt.compare(password, existingUser.password);
      if(!doesPasswordMatch){
-          throw new BadRequestError("Incorrect Password");
+          throw new UnauthorizedError("Invalid email or password", "INVALID_CREDENTIALS");
      }
      const accessToken = generateAccessToken(existingUser.id);
      const refreshToken = generateRefreshToken(existingUser.id);
@@ -99,7 +105,7 @@ const verifyGoogleIdToken = async(idToken, deviceId) =>{
      }
 
      const googleUser = {
-          provider: payload.iss,
+          provider: "google",
           providerId: payload.sub,
           email: payload.email,
           firstName: payload.given_name,

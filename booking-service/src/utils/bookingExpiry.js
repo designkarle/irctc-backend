@@ -4,7 +4,21 @@ const { config } = require('../config');
 const { redis } = require('../config/redis');
 const { forceReleaseSeatLocks } = require('./distributedLock');
 const { compensateAll } = require('../services/saga.service');
+const { userClient } = require('../services/userClient');
 const bookingProducer = require('../kafka/producer/booking.producer');
+
+const fetchUserForNotification = async (userId) => {
+     try {
+          const user = await userClient.getUserById(userId);
+          return user ? { email: user.email, firstName: user.firstName } : {};
+     } catch (err) {
+          logger.warn('Failed to enrich expiry event with user details', {
+               userId,
+               error: err.message,
+          });
+          return {};
+     }
+};
 
 let expiryInterval = null;
 
@@ -91,9 +105,12 @@ async function cleanExpiredBookings() {
 
                     // Publish BOOKING_FAILED
                     try {
+                         const userInfo = await fetchUserForNotification(booking.userId);
                          await bookingProducer.publishBookingFailed({
                               bookingId: booking.id,
                               userId: booking.userId,
+                              email: userInfo.email,
+                              firstName: userInfo.firstName,
                               scheduleId: booking.scheduleId,
                               reason: 'booking_timeout',
                          });
