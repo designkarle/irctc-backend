@@ -1,10 +1,31 @@
 const prisma = require('../config/prisma');
 const logger = require('../config/logger');
-const inventoryProducer = require('../kafka/producer/inventory.producer');
 const { retryTransaction } = require('../utils/retryTransaction');
 const { withIdempotency, recordIdempotency } = require('../utils/idempotency');
+const outbox = require('../utils/outbox');
+const { KAFKA_TOPICS } = require('../../../shared/constants/kafka-topics');
+
+// ─── B1: availability events go through the outbox ───────────────────────────
+// These used to be published after the transaction committed, in a try/catch that
+// only logged. A Kafka outage then left search advertising seats that were already
+// booked — permanently, with no reconciliation path. Writing the event inside the
+// same transaction makes the seat change and its announcement atomic.
+
 const { BadRequestError, NotFoundError, ConflictError, ForbiddenError } = require('../utils/error');
 const { config } = require('../config');
+
+const enqueueAvailability = (tx, { scheduleId, trainId, counts }) =>
+     outbox.enqueue(tx, {
+          topic: KAFKA_TOPICS.SEAT_AVAILABILITY_UPDATED,
+          key: `schedule-${scheduleId}`,
+          payload: {
+               scheduleId,
+               trainId,
+               available: counts.available,
+               locked: counts.locked,
+               booked: counts.booked,
+          },
+     });
 
 // ─── Kafka Event Handlers ───────────────────────────────────────────────────
 
@@ -68,15 +89,16 @@ const initializeInventory = async (eventData) => {
           }
 
           await tx.idempotencyRecord.create({ data: { eventKey } });
+
+          // Same transaction: if the inventory rows commit, search WILL learn about them.
+          await enqueueAvailability(tx, {
+               scheduleId,
+               trainId,
+               counts: { available: totalSeats, locked: 0, booked: 0 },
+          });
      });
 
      logger.info(`Inventory initialized for schedule ${scheduleId} with ${totalSeats} seats`);
-
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(scheduleId, trainId, totalSeats, 0, 0);
-     } catch (err) {
-          logger.error('Failed to publish initial availability event after retries', { scheduleId, error: err.message });
-     }
 };
 
 const cancelScheduleInventory = async (eventData) => {
@@ -114,15 +136,15 @@ const cancelScheduleInventory = async (eventData) => {
           });
 
           await tx.idempotencyRecord.create({ data: { eventKey } });
+
+          await enqueueAvailability(tx, {
+               scheduleId,
+               trainId: schedule.trainId,
+               counts: { available: 0, locked: 0, booked: 0 },
+          });
      });
 
      logger.info(`Inventory cancelled for schedule ${scheduleId}`);
-
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(scheduleId, schedule.trainId, 0, 0, 0);
-     } catch (err) {
-          logger.error('Failed to publish cancellation availability event after retries', { scheduleId, error: err.message });
-     }
 };
 
 // ─── Segment Booking Helpers ─────────────────────────────────────────────────
@@ -415,6 +437,7 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
 
                     // Same transaction as the work: a rollback discards the key too.
                     await recordIdempotency(tx, eventKey, segmentResult);
+                    await enqueueAvailability(tx, segmentResult);
 
                     return segmentResult;
                }
@@ -455,20 +478,15 @@ const lockSeats = async (scheduleId, seatIds, userId, ttlSeconds, fromSeq, toSeq
                };
 
                await recordIdempotency(tx, eventKey, fullJourneyResult);
+               await enqueueAvailability(tx, fullJourneyResult);
 
                return fullJourneyResult;
           }, { timeout: 10000 });
      }));
 
-     // Publish availability update (fire and forget)
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(
-               result.scheduleId, result.trainId,
-               result.counts.available, result.counts.locked, result.counts.booked
-          );
-     } catch (err) {
-          logger.error('Failed to publish availability after lock', { scheduleId: result.scheduleId, error: err.message });
-     }
+     // B1: the availability event was enqueued to the outbox INSIDE the transaction
+     // above, so it is already durable. The relay publishes it. There is deliberately
+     // no post-commit send here — that is the dual-write this replaced.
 
      return result;
 };
@@ -518,6 +536,7 @@ const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq, idempote
                     };
 
                     await recordIdempotency(tx, eventKey, segmentResult);
+                    await enqueueAvailability(tx, segmentResult);
 
                     return segmentResult;
                }
@@ -570,19 +589,13 @@ const unlockSeats = async (scheduleId, seatIds, userId, fromSeq, toSeq, idempote
                };
 
                await recordIdempotency(tx, eventKey, fullJourneyResult);
+               await enqueueAvailability(tx, fullJourneyResult);
 
                return fullJourneyResult;
           }, { timeout: 10000 });
      }));
 
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(
-               result.scheduleId, result.trainId,
-               result.counts.available, result.counts.locked, result.counts.booked
-          );
-     } catch (err) {
-          logger.error('Failed to publish availability after unlock', { scheduleId: result.scheduleId, error: err.message });
-     }
+     // B1: availability event enqueued to the outbox inside the transaction above.
 
      return result;
 };
@@ -662,6 +675,7 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
                     };
 
                     await recordIdempotency(tx, eventKey, segmentResult);
+                    await enqueueAvailability(tx, segmentResult);
 
                     return segmentResult;
                }
@@ -704,19 +718,13 @@ const confirmSeats = async (scheduleId, seatIds, userId, bookingId, fromSeq, toS
                };
 
                await recordIdempotency(tx, eventKey, fullJourneyResult);
+               await enqueueAvailability(tx, fullJourneyResult);
 
                return fullJourneyResult;
           }, { timeout: 10000 });
      }));
 
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(
-               result.scheduleId, result.trainId,
-               result.counts.available, result.counts.locked, result.counts.booked
-          );
-     } catch (err) {
-          logger.error('Failed to publish availability after confirm', { scheduleId: result.scheduleId, error: err.message });
-     }
+     // B1: availability event enqueued to the outbox inside the transaction above.
 
      return result;
 };
@@ -754,6 +762,7 @@ const cancelBooking = async (scheduleId, bookingId, userId, idempotencyKey) => {
                     };
 
                     await recordIdempotency(tx, eventKey, segmentResult);
+                    await enqueueAvailability(tx, segmentResult);
 
                     return segmentResult;
                }
@@ -806,19 +815,13 @@ const cancelBooking = async (scheduleId, bookingId, userId, idempotencyKey) => {
                };
 
                await recordIdempotency(tx, eventKey, fullJourneyResult);
+               await enqueueAvailability(tx, fullJourneyResult);
 
                return fullJourneyResult;
           }, { timeout: 10000 });
      }));
 
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(
-               result.scheduleId, result.trainId,
-               result.counts.available, result.counts.locked, result.counts.booked
-          );
-     } catch (err) {
-          logger.error('Failed to publish availability after cancel-booking', { scheduleId: result.scheduleId, error: err.message });
-     }
+     // B1: availability event enqueued to the outbox inside the transaction above.
 
      return result;
 };
@@ -837,16 +840,20 @@ const recountAndPublish = async (scheduleId) => {
 
      const { available, locked, booked } = counts[0];
 
-     const schedule = await prisma.scheduleInventory.update({
-          where: { scheduleId },
-          data: { available, locked, booked, version: { increment: 1 } },
-     });
+     // Recount + announce must commit together, otherwise the lock-expiry job can
+     // free seats that search never learns about.
+     await prisma.$transaction(async (tx) => {
+          const schedule = await tx.scheduleInventory.update({
+               where: { scheduleId },
+               data: { available, locked, booked, version: { increment: 1 } },
+          });
 
-     try {
-          await inventoryProducer.publishSeatAvailabilityUpdated(scheduleId, schedule.trainId, available, locked, booked);
-     } catch (err) {
-          logger.error('Failed to publish availability after recount', { scheduleId, error: err.message });
-     }
+          await enqueueAvailability(tx, {
+               scheduleId,
+               trainId: schedule.trainId,
+               counts: { available, locked, booked },
+          });
+     });
 
      return { available, locked, booked };
 };

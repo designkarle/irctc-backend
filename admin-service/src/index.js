@@ -14,6 +14,8 @@ const { corsMiddleware } = require('./middlewares/cors.middleware');
 const errorHandler = require('./middlewares/error.middleware');
 const { reqLogger } = require('./middlewares/req.middleware');
 const { disconnectProducer } = require('./config/kafka');
+const { installGracefulShutdown, closeHttpServer } = require('../../shared/utils/gracefulShutdown');
+const prisma = require('./config/prisma');
 
 const app = express();
 
@@ -65,19 +67,15 @@ const startServer = async () => {
                );
           });
 
-          // Graceful shutdown
-          const shutdown = async () => {
-               logger.info('Shutting down gracefully...');
-
-               server.close(async () => {
-                    await disconnectProducer();
-                    logger.info('Server closed');
-                    process.exit(0);
-               });
-          };
-
-          process.on('SIGTERM', shutdown);
-          process.on('SIGINT', shutdown);
+          // B7: ordered teardown instead of nesting everything inside server.close.
+          installGracefulShutdown({
+               logger,
+               steps: [
+                    { name: 'http server', fn: () => closeHttpServer(server, logger) },
+                    { name: 'kafka producer', fn: () => disconnectProducer() },
+                    { name: 'prisma', fn: () => prisma.$disconnect() },
+               ],
+          });
 
      } catch (error) {
           logger.error('Failed to start server', error);

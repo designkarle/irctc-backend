@@ -1,6 +1,9 @@
 require('dotenv').config();
 const emailConsumer = require('./kafka/consumer/email.consumer');
 const logger = require('./config/logger');
+const { disconnectAll } = require('./config/kafka');
+const { installGracefulShutdown } = require('../../shared/utils/gracefulShutdown');
+
 async function startNotificationService() {
      try {
           logger.info('Starting Notification Service...');
@@ -13,6 +16,18 @@ async function startNotificationService() {
           }
 
           await emailConsumer.start();
+
+          // B7: this service had NO drain at all — config/kafka.js registered a signal
+          // handler that disconnected and immediately process.exit(0)'d, abandoning any
+          // email currently being sent. Since notification-service is the last hop for
+          // ticket confirmations, a dropped in-flight message is a customer who paid
+          // and never heard back.
+          installGracefulShutdown({
+               logger,
+               steps: [
+                    { name: 'kafka drain', fn: () => disconnectAll() },
+               ],
+          });
 
           logger.info('✅ Notification Service started successfully');
           logger.info('Service is ready to process notifications');

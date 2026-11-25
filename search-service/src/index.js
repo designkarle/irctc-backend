@@ -14,6 +14,7 @@ const { reqLogger } = require('./middlewares/req.middleware');
 const searchRoutes = require('./routes/search.route');
 const searchConsumer = require('./kafka/consumer/search.consumer');
 const { disconnectAll } = require('./config/kafka');
+const { installGracefulShutdown, closeHttpServer } = require('../../shared/utils/gracefulShutdown');
 
 const app = express();
 
@@ -56,15 +57,17 @@ const startServer = async () => {
           logger.info(`${config.SERVICE_NAME} running on http://localhost:${config.PORT}`);
      });
 
-     const shutdown = async () => {
-          logger.info('Shutting down...');
-          server.close(async () => {
-               await disconnectAll();
-               process.exit(0);
-          });
-     };
-     process.on('SIGTERM', shutdown);
-     process.on('SIGINT', shutdown);
+     // B7: Kafka teardown used to be nested inside the server.close callback, so a
+     // lingering keep-alive connection meant the consumer was never drained. That
+     // matters more here now that handlers rethrow (B6): an abandoned in-flight
+     // message with a committed offset is a permanently missed index update.
+     installGracefulShutdown({
+          logger,
+          steps: [
+               { name: 'http server', fn: () => closeHttpServer(server, logger) },
+               { name: 'kafka drain', fn: () => disconnectAll() },
+          ],
+     });
 };
 
 startServer();

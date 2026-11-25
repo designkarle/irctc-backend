@@ -2,6 +2,56 @@ const { esClient, TRAIN_INDEX, STATION_INDEX } = require('../config/elasticsearc
 const logger = require('../config/logger');
 
 // ═══════════════════════════════════════════════════
+//  B6: consumer handlers must THROW
+// ═══════════════════════════════════════════════════
+//
+// Every handler below used to catch its own error and log a warning. withDLQ only
+// reacts to a thrown error, so the DLQ was unreachable code for this entire
+// service — and because the handler returned normally, KafkaJS committed the
+// offset and the message was gone for good.
+//
+// Concretely: two minutes of Elasticsearch downtime silently and permanently
+// desynchronised search from inventory. No DLQ entry, no replay path, no record
+// of what was missed. Users would then see seats that search said were free and
+// booking rejected with a 409.
+//
+// Handlers now let errors propagate so withDLQ can retry and, failing that,
+// quarantine the message for replay. classifyEsError only shapes the LOG — it
+// never decides whether to swallow, because swallowing is what caused the loss.
+
+const classifyEsError = (err) => {
+     const status = err?.meta?.statusCode;
+     const type = err?.meta?.body?.error?.type;
+
+     // Cluster unreachable / overloaded / timing out — near-certain to succeed later.
+     if (!status || status === 429 || status >= 500) return 'transient';
+     if (err.name === 'ConnectionError' || err.name === 'TimeoutError') return 'transient';
+
+     // Target document not indexed yet. Usually event ordering (a schedule arriving
+     // before its train), which a retry often resolves; if not, the DLQ is the
+     // correct destination so someone can replay it after backfilling the train.
+     if (status === 404 || type === 'document_missing_exception') return 'ordering';
+
+     // Mapping conflicts, malformed scripts, bad payloads. Retrying will not help;
+     // these belong in the DLQ so the payload can actually be inspected.
+     return 'poison';
+};
+
+/** Log with the right severity, then rethrow so withDLQ can do its job. */
+const rethrowEsError = (err, operation, context) => {
+     const kind = classifyEsError(err);
+     const detail = { ...context, kind, status: err?.meta?.statusCode, error: err.message };
+
+     if (kind === 'transient') {
+          logger.warn(`${operation} failed against Elasticsearch (retryable)`, detail);
+     } else {
+          logger.error(`${operation} failed against Elasticsearch`, detail);
+     }
+
+     throw err;
+};
+
+// ═══════════════════════════════════════════════════
 //  INDEX OPERATIONS (called by Kafka consumer)
 // ═══════════════════════════════════════════════════
 
@@ -31,7 +81,7 @@ const indexStation = async (event) => {
           });
           logger.info(`Indexed station ${station.name} (${station.code})`);
      } catch (err) {
-          logger.error(`Failed to index station: ${err.message}`);
+          rethrowEsError(err, 'Index station', { stationId: station.id, code: station.code });
      }
 };
 
@@ -129,7 +179,7 @@ const indexSchedule = async (scheduleEvent) => {
           });
           logger.info(`Indexed schedule ${scheduleId} for train ${trainId}`);
      } catch (err) {
-          logger.warn(`Could not index schedule for train ${trainId}: ${err.message}`);
+          rethrowEsError(err, 'Index schedule', { scheduleId, trainId });
      }
 };
 
@@ -161,7 +211,7 @@ const cancelSchedule = async (event) => {
           });
           logger.info(`Cancelled schedule ${schedule.id} for train ${schedule.trainId}`);
      } catch (err) {
-          logger.warn(`Could not cancel schedule: ${err.message}`);
+          rethrowEsError(err, 'Cancel schedule', { scheduleId: schedule.id, trainId: schedule.trainId });
      }
 };
 
@@ -193,7 +243,9 @@ const updateSeatAvailability = async (event) => {
           });
           logger.info(`Updated availability for schedule ${scheduleId}`);
      } catch (err) {
-          logger.warn(`Could not update availability: ${err.message}`);
+          // The highest-volume handler: fires on every seat lock/unlock/confirm/cancel.
+          // Losing these is what makes search show phantom availability.
+          rethrowEsError(err, 'Update seat availability', { scheduleId, trainId });
      }
 };
 

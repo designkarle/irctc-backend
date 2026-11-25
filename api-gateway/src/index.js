@@ -9,6 +9,8 @@ const errorHandler = require('./middlewares/error.middleware');
 const { notFound } = require('./middlewares/notFound.middleware');
 const { reqLogger } = require('./middlewares/req.middleware');
 const { corsMiddleware } = require('./middlewares/cors.middleware');
+const { installGracefulShutdown, closeHttpServer } = require('../../shared/utils/gracefulShutdown');
+const { RedisClient } = require('./config/redis');
 const routes = require('./routes');
 const app = express();
 
@@ -48,29 +50,40 @@ app.use('/api', routes);
 app.use(notFound);
 app.use(errorHandler);
 
-const gracefulShutdown = () => {
-     logger.info('Received shutdown signal, closing server gracefully...');
-     server.close(() => {
-          logger.info('Server closed');
-          process.exit(0);
-     });
-
-     setTimeout(() => {
-          logger.error('Forced shutdown after timeout');
-          process.exit(1);
-     }, 30000);
-};
-
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
-
 const server = app.listen(config.PORT, () => {
      logger.info(`🚀 API Gateway running on port ${config.PORT} in ${config.NODE_ENV} mode`);
 });
 
+// B7: the old handler could hang forever on a keep-alive connection, since
+// server.close() waits for every socket to close on its own.
+installGracefulShutdown({
+     logger,
+     steps: [
+          { name: 'http server', fn: () => closeHttpServer(server, logger) },
+          { name: 'redis', fn: () => RedisClient.closeConnection() },
+     ],
+});
+
 process.on('unhandledRejection', (err) => {
-     logger.error('Unhandled Rejection:', err);
-     server.close(() => process.exit(1));
+     // This used to call server.close() + process.exit(1), taking down the SINGLE
+     // entrypoint to the entire system over one stray rejection — and the async
+     // middleware in the proxy and rate-limiter paths makes those entirely possible.
+     // An unhandled rejection is a bug to fix, not a reason to drop all traffic.
+     logger.error('Unhandled Rejection — continuing', {
+          error: err?.message,
+          stack: err?.stack,
+     });
+});
+
+process.on('uncaughtException', (err) => {
+     // An uncaught exception genuinely leaves the process in an unknown state, so
+     // here exiting IS correct — but go through the graceful path so in-flight
+     // requests get a chance to finish.
+     logger.error('Uncaught Exception — shutting down', {
+          error: err?.message,
+          stack: err?.stack,
+     });
+     process.kill(process.pid, 'SIGTERM');
 });
 
 module.exports = app;

@@ -21,31 +21,31 @@ const userServiceProxy = createProxy('userService', config.SERVICES.USER_SERVICE
 // public routes
 router.post(
      '/users/auth/send-otp',
-     endpointRateLimit(5, 3600000), // 5 requests per hour
+     endpointRateLimit(5, 3600000, 'POST:/users/auth/send-otp'), // 5 requests per hour
      userServiceProxy
 );
 
 router.post(
      '/users/auth/verify-otp',
-     endpointRateLimit(10, 3600000), // 10 requests per hour
+     endpointRateLimit(10, 3600000, 'POST:/users/auth/verify-otp'), // 10 requests per hour
      userServiceProxy
 );
 
 router.post(
      '/users/auth/login',
-     endpointRateLimit(100, 900000),// 100 requests per 15 minutes
+     endpointRateLimit(100, 900000, 'POST:/users/auth/login'),// 100 requests per 15 minutes
      userServiceProxy
 );
 
 router.post(
      '/users/auth/google-auth',
-     endpointRateLimit(10, 900000), // 10 requests per 15 minutes
+     endpointRateLimit(10, 900000, 'POST:/users/auth/google-auth'), // 10 requests per 15 minutes
      userServiceProxy
 );
 
 router.post(
      '/users/auth/refresh',
-     endpointRateLimit(20, 900000), // 20 requests per 15 minutes
+     endpointRateLimit(20, 900000, 'POST:/users/auth/refresh'), // 20 requests per 15 minutes
      userServiceProxy
 );
 
@@ -128,13 +128,13 @@ const searchServiceProxy = createProxy('searchService', config.SERVICES.SEARCH_S
 
 router.get(
      '/search/trains',
-     endpointRateLimit(60, 60000), // 60 requests per minute
+     endpointRateLimit(60, 60000, 'GET:/search/trains'), // 60 requests per minute
      searchServiceProxy
 );
 
 router.get(
      '/search/autocomplete',
-     endpointRateLimit(120, 60000), // 120 requests per minute
+     endpointRateLimit(120, 60000, 'GET:/search/autocomplete'), // 120 requests per minute
      searchServiceProxy
 );
 
@@ -146,7 +146,7 @@ const inventoryServiceProxy = createProxy('inventoryService', config.SERVICES.IN
 // Public: aggregate availability (used by search results)
 router.get(
      '/inventory/schedules/:scheduleId/availability',
-     endpointRateLimit(120, 60000), // 120 requests per minute
+     endpointRateLimit(120, 60000, 'GET:/inventory/schedules/:scheduleId/availability'), // 120 requests per minute
      inventoryServiceProxy
 );
 
@@ -169,7 +169,7 @@ const bookingServiceProxy = createProxy('bookingService', config.SERVICES.BOOKIN
 router.post(
      '/bookings/bookings',
      requireAuth,
-     endpointRateLimit(5, 60000), // 5 booking attempts per minute
+     endpointRateLimit(5, 60000, 'POST:/bookings/bookings'), // 5 booking attempts per minute
      bookingServiceProxy
 );
 

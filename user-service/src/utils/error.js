@@ -43,6 +43,17 @@ class TooManyRequestsError extends AppError {
      }
 }
 
+/**
+ * A backing store this operation genuinely requires is unreachable.
+ * Distinct from InternalServerError: the request was well-formed and the service
+ * is fine — a dependency is down, and retrying shortly is the right response.
+ */
+class ServiceUnavailableError extends AppError {
+     constructor(message = 'Service temporarily unavailable', code = 'SERVICE_UNAVAILABLE') {
+          super(message, 503, code);
+     }
+}
+
 class InternalServerError extends AppError {
      constructor(message = 'Internal Server Error', code = 'SERVER_ERROR') {
           super(message, 500, code);
@@ -57,5 +68,6 @@ module.exports = {
      NotFoundError,
      ConflictError,
      TooManyRequestsError,
+     ServiceUnavailableError,
      InternalServerError
 };

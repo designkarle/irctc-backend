@@ -8,9 +8,11 @@ const cookieParser = require('cookie-parser');
 const { corsMiddleware } = require('./middlewares/cors.middleware');
 const errorHandler = require('./middlewares/error.middleware');
 const { reqLogger } = require('./middlewares/req.middleware');
-const { disconnectAll } = require('./config/kafka');
+const { disconnectProducer, disconnectConsumer } = require('./config/kafka');
+const { installGracefulShutdown, closeHttpServer } = require('../../shared/utils/gracefulShutdown');
 
 const prisma = require('./config/prisma');
+const outbox = require('./utils/outbox');
 const inventoryRoutes = require('./routes/inventory.route');
 const inventoryConsumer = require('./kafka/consumer/inventory.consumer');
 const { startLockExpiryJob, stopLockExpiryJob } = require('./utils/lockExpiry');
@@ -59,6 +61,7 @@ const startServer = async () => {
      try {
           await inventoryConsumer.start();
           startLockExpiryJob();
+          outbox.startRelay();
 
           const server = app.listen(config.PORT, () => {
                logger.info(
@@ -66,20 +69,22 @@ const startServer = async () => {
                );
           });
 
-          // Graceful shutdown
-          const shutdown = async () => {
-               logger.info('Shutting down gracefully...');
-               stopLockExpiryJob();
+          // B7: see shared/utils/gracefulShutdown.js for why the order matters.
+          installGracefulShutdown({
+               logger,
+               steps: [
+                    { name: 'http server', fn: () => closeHttpServer(server, logger) },
+                    { name: 'kafka consumer drain', fn: () => disconnectConsumer() },
 
-               server.close(async () => {
-                    await disconnectAll();
-                    logger.info('Server closed');
-                    process.exit(0);
-               });
-          };
+                    // Awaits the running cycle: exiting mid-sweep could leave segment
+                    // locks deleted but seat statuses not yet recomputed.
+                    { name: 'lock expiry job', fn: () => stopLockExpiryJob() },
 
-          process.on('SIGTERM', shutdown);
-          process.on('SIGINT', shutdown);
+                    { name: 'outbox drain', fn: () => outbox.stopRelay() },
+                    { name: 'kafka producer', fn: () => disconnectProducer() },
+                    { name: 'prisma', fn: () => prisma.$disconnect() },
+               ],
+          });
 
      } catch (error) {
           logger.error('Failed to start server', error);

@@ -5,6 +5,7 @@ const notificationProducer = require('../kafka/producer/notification.producer')
 const bcrypt = require('bcrypt');
 const prisma = require('../config/prisma');
 const {redis} = require('../config/redis');
+const { cacheSet, requireRedis } = require('../utils/cache');
 const { config } = require("../config");
 const logger = require('../config/logger');
 const jwt = require('jsonwebtoken');
@@ -68,9 +69,19 @@ const login = async(email, password, deviceId) =>{
      const accessToken = generateAccessToken(existingUser.id);
      const refreshToken = generateRefreshToken(existingUser.id);
      const {jti} = jwt.decode(refreshToken);
-     await redis.set(`refresh:${existingUser.id}:${deviceId}`, jti, 'EX', config.REFRESH_TOKEN_EXP_SEC);
+
+     // The refresh-token JTI has no database fallback — rotation and reuse detection
+     // depend on it, so a login that cannot record it must fail loudly (503), not
+     // hand out a token the refresh endpoint will later reject.
+     await requireRedis('session creation', () =>
+          redis.set(`refresh:${existingUser.id}:${deviceId}`, jti, 'EX', config.REFRESH_TOKEN_EXP_SEC)
+     );
+
      const {password: _password, ...safeUser} = existingUser;
-     await redis.set(`user:${existingUser.id}`, JSON.stringify(safeUser), 'EX', config.REDIS_USER_TTL);
+
+     // The profile cache, by contrast, is pure acceleration — never fail a login for it.
+     await cacheSet(`user:${existingUser.id}`, safeUser, config.REDIS_USER_TTL);
+
      return {accessToken, refreshToken, loggedInUser: safeUser};
 }
 
@@ -78,19 +89,25 @@ const login = async(email, password, deviceId) =>{
 const rotateRefreshToken = async(refreshToken, deviceId) =>{
      const payload = verifyRefreshToken(refreshToken);
      const {id: userId, jti} = payload;
-     const storedJti = await redis.get(`refresh:${userId}:${deviceId}`);
-     if(!storedJti){
-          throw new ForbiddenError("Session Expired", "Login AGAIN")
-     }
-     if(storedJti !== jti){
-          await redis.del(`refresh:${userId}:${deviceId}`);
-          throw new ForbiddenError("Refresh token reused", "LOGIN AGAIN")
-     }
-     const newAccessToken = generateAccessToken(payload.id);
-     const newRefreshToken = generateRefreshToken(payload.id);
-     const {jti: newJti} = jwt.decode(newRefreshToken);
-     await redis.set(`refresh:${payload.id}:${deviceId}`, newJti, 'EX', config.REFRESH_TOKEN_EXP_SEC);
-     return {newAccessToken, newRefreshToken};
+
+     // Rotation is entirely Redis-backed. If the store is unreachable we must NOT
+     // treat a missing JTI as "session expired" — that would log every user out
+     // during a Redis blip. requireRedis surfaces a retryable 503 instead.
+     return requireRedis('token rotation', async () => {
+          const storedJti = await redis.get(`refresh:${userId}:${deviceId}`);
+          if(!storedJti){
+               throw new ForbiddenError("Session Expired", "Login AGAIN")
+          }
+          if(storedJti !== jti){
+               await redis.del(`refresh:${userId}:${deviceId}`);
+               throw new ForbiddenError("Refresh token reused", "LOGIN AGAIN")
+          }
+          const newAccessToken = generateAccessToken(payload.id);
+          const newRefreshToken = generateRefreshToken(payload.id);
+          const {jti: newJti} = jwt.decode(newRefreshToken);
+          await redis.set(`refresh:${payload.id}:${deviceId}`, newJti, 'EX', config.REFRESH_TOKEN_EXP_SEC);
+          return {newAccessToken, newRefreshToken};
+     });
 }
 
 const verifyGoogleIdToken = async(idToken, deviceId) =>{
@@ -163,10 +180,15 @@ const verifyGoogleIdToken = async(idToken, deviceId) =>{
      const accessToken = generateAccessToken(user.id);
      const refreshToken = generateRefreshToken(user.id);
      const {jti} = jwt.decode(refreshToken);
-     await redis.set(`refresh:${user.id}:${deviceId}`, jti, 'EX', config.REFRESH_TOKEN_EXP_SEC);
+
+     await requireRedis('session creation', () =>
+          redis.set(`refresh:${user.id}:${deviceId}`, jti, 'EX', config.REFRESH_TOKEN_EXP_SEC)
+     );
+
      const {password: _password, ...safeUser} = user;
-     await redis.set(`user:${user.id}`, JSON.stringify(safeUser), 'EX', config.REDIS_USER_TTL);
+     await cacheSet(`user:${user.id}`, safeUser, config.REDIS_USER_TTL);
+
      return {accessToken, refreshToken, loggedInUser: safeUser};
-     
+
 }
 module.exports = {sendOTP, verifyOTP, login, rotateRefreshToken, verifyGoogleIdToken}

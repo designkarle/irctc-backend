@@ -26,6 +26,17 @@ const config = {
      // Must exceed a worst-case confirm — inventory call with retries — so we never
      // interfere with a request that is merely slow.
      STUCK_BOOKING_THRESHOLD_MS: parseInt(process.env.STUCK_BOOKING_THRESHOLD_MS || '120000', 10),
+
+     // Max bookings processed per expiry tick. Bounds memory and cycle duration when
+     // a backlog has built up; the next tick picks up where this one left off.
+     EXPIRY_JOB_BATCH_SIZE: parseInt(process.env.EXPIRY_JOB_BATCH_SIZE || '500', 10),
+
+     // ─── Database connection pool (B5) ───────────────────────────────────────
+     // PER PROCESS. Keep (max x instances x services) < postgres max_connections.
+     DB_POOL_MAX: parseInt(process.env.DB_POOL_MAX || '10', 10),
+     DB_CONNECTION_TIMEOUT_MS: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10),
+     DB_IDLE_TIMEOUT_MS: parseInt(process.env.DB_IDLE_TIMEOUT_MS || '30000', 10),
+     DB_STATEMENT_TIMEOUT_MS: parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '15000', 10),
 }
 
 module.exports = { config };

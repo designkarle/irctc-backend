@@ -1,9 +1,10 @@
 const prisma = require('../config/prisma');
 const logger = require('../config/logger');
-const paymentProducer = require('../kafka/producer/payment.producer');
 const { getGateway } = require('./gateways/gateway.factory');
 const { BadRequestError, NotFoundError, ConflictError } = require('../utils/error');
 const { config } = require('../config');
+const outbox = require('../utils/outbox');
+const { KAFKA_TOPICS } = require('../../../shared/constants/kafka-topics');
 
 // ─── Optimistic Lock Helper (CAS — Compare-And-Swap) ─────────────────────────
 // The webhook and the browser's verify call routinely arrive within milliseconds
@@ -14,8 +15,8 @@ const { config } = require('../config');
 // Returns true when this caller won the transition, false when another already did.
 // Callers must only emit side effects (Kafka, audit-of-record) when it returns true.
 
-const casUpdatePaymentOrder = async (paymentOrderId, expectedVersion, data) => {
-     const result = await prisma.paymentOrder.updateMany({
+const casUpdatePaymentOrder = async (paymentOrderId, expectedVersion, data, client = prisma) => {
+     const result = await client.paymentOrder.updateMany({
           where: { id: paymentOrderId, version: expectedVersion },
           data: { ...data, version: { increment: 1 } },
      });
@@ -27,6 +28,53 @@ const casUpdatePaymentOrder = async (paymentOrderId, expectedVersion, data) => {
 
      return true;
 };
+
+/**
+ * B1: transition a payment order and record its event atomically.
+ *
+ * The publish used to happen after the update committed, in a `.catch(log)` — so a
+ * Kafka outage captured the customer's money and never told booking-service, which
+ * meant no seats confirmed and no ticket. Both now commit together or neither does.
+ *
+ * @returns {Promise<boolean>} whether this caller won the CAS.
+ */
+const transitionAndAnnounce = async (paymentOrder, data, event) => {
+     return prisma.$transaction(async (tx) => {
+          const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, data, tx);
+          if (!won) return false;
+
+          if (event) {
+               await outbox.enqueue(tx, {
+                    topic: event.topic,
+                    key: `payment-${paymentOrder.id}`,
+                    payload: event.payload,
+               });
+          }
+
+          return true;
+     });
+};
+
+const paymentSuccessEvent = (paymentOrder, gatewayPaymentId) => ({
+     topic: KAFKA_TOPICS.PAYMENT_SUCCESS,
+     payload: {
+          paymentOrderId: paymentOrder.id,
+          bookingId: paymentOrder.bookingId,
+          gatewayPaymentId,
+          amount: paymentOrder.amount,
+          capturedAt: new Date().toISOString(),
+     },
+});
+
+const paymentFailedEvent = (paymentOrder, reason) => ({
+     topic: KAFKA_TOPICS.PAYMENT_FAILED,
+     payload: {
+          paymentOrderId: paymentOrder.id,
+          bookingId: paymentOrder.bookingId,
+          reason,
+          failedAt: new Date().toISOString(),
+     },
+});
 
 // ─── Idempotency Helper ──────────────────────────────────────────────────────
 
@@ -180,13 +228,17 @@ const handlePaymentCaptured = async (paymentOrder, gatewayPaymentId, paymentEnti
           return { status: 'invalid_state', currentStatus: paymentOrder.status };
      }
 
-     // Claim the transition. If the client-side verify captured it first, bail out
-     // rather than publishing a second PAYMENT_SUCCESS for the same order.
-     const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
-          status: 'CAPTURED',
-          gatewayPaymentId,
-          gatewaySignature: paymentEntity.acquirer_data?.auth_code || null,
-     });
+     // Claim the transition and record the event in one transaction. If the
+     // client-side verify captured it first we lose the CAS and emit nothing.
+     const won = await transitionAndAnnounce(
+          paymentOrder,
+          {
+               status: 'CAPTURED',
+               gatewayPaymentId,
+               gatewaySignature: paymentEntity.acquirer_data?.auth_code || null,
+          },
+          paymentSuccessEvent(paymentOrder, gatewayPaymentId)
+     );
 
      if (!won) {
           logger.info(`Payment ${paymentOrder.id} already captured by another path — webhook is a no-op`);
@@ -194,16 +246,6 @@ const handlePaymentCaptured = async (paymentOrder, gatewayPaymentId, paymentEnti
      }
 
      logger.info(`Payment captured: ${paymentOrder.id}`, { gatewayPaymentId });
-
-     // Publish PAYMENT_SUCCESS to Kafka
-     await paymentProducer.publishPaymentSuccess(
-          paymentOrder.id,
-          paymentOrder.bookingId,
-          gatewayPaymentId,
-          paymentOrder.amount
-     ).catch(err => {
-          logger.error('Failed to publish PAYMENT_SUCCESS', { error: err.message });
-     });
 
      return { status: 'captured', paymentOrderId: paymentOrder.id };
 };
@@ -220,11 +262,11 @@ const handlePaymentFailed = async (paymentOrder, gatewayPaymentId, paymentEntity
 
      const reason = paymentEntity.error_description || paymentEntity.error_reason || 'payment_failed';
 
-     const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
-          status: 'FAILED',
-          gatewayPaymentId,
-          failureReason: reason,
-     });
+     const won = await transitionAndAnnounce(
+          paymentOrder,
+          { status: 'FAILED', gatewayPaymentId, failureReason: reason },
+          paymentFailedEvent(paymentOrder, reason)
+     );
 
      if (!won) {
           logger.info(`Payment ${paymentOrder.id} already transitioned by another path — failure webhook is a no-op`);
@@ -232,15 +274,6 @@ const handlePaymentFailed = async (paymentOrder, gatewayPaymentId, paymentEntity
      }
 
      logger.info(`Payment failed: ${paymentOrder.id}`, { reason });
-
-     // Publish PAYMENT_FAILED to Kafka
-     await paymentProducer.publishPaymentFailed(
-          paymentOrder.id,
-          paymentOrder.bookingId,
-          reason
-     ).catch(err => {
-          logger.error('Failed to publish PAYMENT_FAILED', { error: err.message });
-     });
 
      return { status: 'failed', paymentOrderId: paymentOrder.id };
 };
@@ -343,32 +376,23 @@ const verifyAndCapturePayment = async (paymentOrderId, gatewayPaymentId, gateway
      });
 
      if (!isValid) {
-          const wonFailure = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
-               status: 'FAILED',
-               failureReason: 'signature_verification_failed',
-          });
-
-          // Only announce the failure if we actually moved the order into it — a
+          // The event is only recorded if we actually moved the order into FAILED — a
           // concurrent webhook may have legitimately captured it in the meantime.
-          if (wonFailure) {
-               await paymentProducer.publishPaymentFailed(
-                    paymentOrder.id,
-                    paymentOrder.bookingId,
-                    'signature_verification_failed'
-               ).catch(err => {
-                    logger.error('Failed to publish PAYMENT_FAILED after sig failure', { error: err.message });
-               });
-          }
+          await transitionAndAnnounce(
+               paymentOrder,
+               { status: 'FAILED', failureReason: 'signature_verification_failed' },
+               paymentFailedEvent(paymentOrder, 'signature_verification_failed')
+          );
 
           throw new BadRequestError('Payment signature verification failed', 'INVALID_SIGNATURE');
      }
 
-     // Signature valid — claim the capture.
-     const won = await casUpdatePaymentOrder(paymentOrder.id, paymentOrder.version, {
-          status: 'CAPTURED',
-          gatewayPaymentId,
-          gatewaySignature,
-     });
+     // Signature valid — claim the capture and record the event atomically.
+     const won = await transitionAndAnnounce(
+          paymentOrder,
+          { status: 'CAPTURED', gatewayPaymentId, gatewaySignature },
+          paymentSuccessEvent(paymentOrder, gatewayPaymentId)
+     );
 
      if (!won) {
           // The webhook captured it first. That path already published PAYMENT_SUCCESS,
@@ -394,15 +418,9 @@ const verifyAndCapturePayment = async (paymentOrderId, gatewayPaymentId, gateway
 
      logger.info(`Payment captured via verify: ${paymentOrder.id}`);
 
-     // Publish PAYMENT_SUCCESS
-     await paymentProducer.publishPaymentSuccess(
-          paymentOrder.id,
-          paymentOrder.bookingId,
-          gatewayPaymentId,
-          paymentOrder.amount
-     ).catch(err => {
-          logger.error('Failed to publish PAYMENT_SUCCESS after verify', { error: err.message });
-     });
+     // B1: PAYMENT_SUCCESS was enqueued to the outbox in the same transaction as the
+     // capture above. No post-commit send here — that dual-write is what let a Kafka
+     // outage take a customer's money without ever confirming their seats.
 
      return {
           paymentOrderId: paymentOrder.id,

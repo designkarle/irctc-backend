@@ -132,3 +132,40 @@ model IdempotencyRecord {
   @@index([status, updatedAt])
   @@map("idempotency_records")
 }
+
+/// B3: database-backed leader election lease.
+/// Replaces the Redis SET NX (which stopped every instance from running the job
+/// when Redis was down) and the session-scoped pg advisory lock (which could leak
+/// across pooled connections and wedge the job permanently).
+model LeaderLease {
+  name      String   @id
+  holder    String
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt])
+  @@map("leader_leases")
+}
+
+/// B1: transactional outbox.
+/// Events are written in the SAME transaction as the state change that produced
+/// them, so a Kafka outage can no longer leave the database correct while the
+/// rest of the system is permanently stale. A relay publishes these rows and
+/// stamps publishedAt. Delivery is at-least-once; every consumer is idempotent.
+model OutboxEvent {
+  id            String    @id @default(uuid())
+  topic         String
+  eventKey      String
+  payload       Json
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  claimedAt     DateTime?
+  claimedBy     String?
+  lastError     String?
+  publishedAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([publishedAt, nextAttemptAt])
+  @@index([createdAt])
+  @@map("outbox_events")
+}

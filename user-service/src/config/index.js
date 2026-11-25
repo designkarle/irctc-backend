@@ -30,6 +30,13 @@ const config = {
   GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
 
   INTERNAL_SERVICE_KEY: process.env.INTERNAL_SERVICE_KEY,
+
+  // ─── Database connection pool (B5) ───────────────────────────────────────
+  // PER PROCESS. Keep (max x instances x services) < postgres max_connections.
+  DB_POOL_MAX: parseInt(process.env.DB_POOL_MAX || '10', 10),
+  DB_CONNECTION_TIMEOUT_MS: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10),
+  DB_IDLE_TIMEOUT_MS: parseInt(process.env.DB_IDLE_TIMEOUT_MS || '30000', 10),
+  DB_STATEMENT_TIMEOUT_MS: parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '15000', 10),
 }
 
 
@@ -44,4 +51,5 @@ if (!config.SENDGRID_API_KEY) {
 if (!config.MAIL_SEND) {
   throw new Error('MAIL_SEND missing');
 }
+
 module.exports = { config };

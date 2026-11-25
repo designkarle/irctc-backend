@@ -7,8 +7,37 @@ const { userClient } = require('./userClient');
 const { stationClient } = require('./stationClient');
 const { acquireSeatLocks, releaseSeatLocks, forceReleaseSeatLocks } = require('../utils/distributedLock');
 const saga = require('./saga.service');
-const bookingProducer = require('../kafka/producer/booking.producer');
+const outbox = require('../utils/outbox');
+const { KAFKA_TOPICS } = require('../../../shared/constants/kafka-topics');
 const { BadRequestError, NotFoundError, ConflictError, StaleStateError } = require('../utils/error');
+
+// ─── B1: booking events go through the transactional outbox ──────────────────
+//
+// These were published after the status update committed, wrapped in a try/catch
+// that logged and moved on — one of them literally logs
+// "CRITICAL: ... notification/search may be stale". A Kafka outage meant a
+// confirmed, paid-for booking whose owner never received a ticket, with no record
+// that the notification was owed and no way to replay it.
+//
+// The event row is now written in the same transaction as the status change, so
+// the two are atomic, and the relay delivers it whenever Kafka comes back.
+//
+// Note on ordering: notification payloads carry enriched fields (user email,
+// station names) that require HTTP calls. Those MUST be fetched before the
+// transaction opens — never hold a database transaction across a network call.
+
+const enqueueBookingEvent = (tx, topic, bookingId, payload) =>
+     outbox.enqueue(tx, { topic, key: `booking-${bookingId}`, payload });
+
+/** Gather the notification fields for a booking. Best effort — never throws. */
+const fetchBookingEnrichment = async (booking, { withStations = false } = {}) => {
+     const [userInfo, fromStationName, toStationName] = await Promise.all([
+          fetchUserForNotification(booking.userId),
+          withStations ? fetchStationName(booking.fromStationId) : Promise.resolve(null),
+          withStations ? fetchStationName(booking.toStationId) : Promise.resolve(null),
+     ]);
+     return { userInfo: userInfo || {}, fromStationName, toStationName };
+};
 
 // ─── Optimistic Lock Helper (CAS — Compare-And-Swap) ────────────────────────
 // Atomically updates booking status ONLY IF the version hasn't changed since read.
@@ -413,20 +442,19 @@ const refundOrphanedPayment = async (booking, gatewayPaymentId, amount) => {
                `${booking.id}-late-payment-refund`
           );
 
-          await prisma.sagaLog.update({
-               where: { id: sagaLog.id },
-               data: { status: 'COMPENSATED', response: result },
-          });
+          // Enrich before the transaction — HTTP must never run inside one.
+          const { userInfo } = await fetchBookingEnrichment(booking);
 
-          logger.info(`Refunded late payment for ${booking.status} booking ${booking.id}`, {
-               paymentOrderId: booking.paymentOrderId,
-               amount: refundAmount,
-          });
+          // Mark the compensation done and queue the customer notification together.
+          // Telling the user a refund is coming is the only signal they will get, so
+          // it must not be lost if Kafka happens to be down at this moment.
+          await prisma.$transaction(async (tx) => {
+               await tx.sagaLog.update({
+                    where: { id: sagaLog.id },
+                    data: { status: 'COMPENSATED', response: result },
+               });
 
-          // Tell the user their money is coming back — nothing else in the system will.
-          try {
-               const userInfo = await fetchUserForNotification(booking.userId);
-               await bookingProducer.publishBookingCancelled({
+               await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_CANCELLED, booking.id, {
                     bookingId: booking.id,
                     userId: booking.userId,
                     email: userInfo.email,
@@ -434,13 +462,14 @@ const refundOrphanedPayment = async (booking, gatewayPaymentId, amount) => {
                     scheduleId: booking.scheduleId,
                     reason: 'late_payment_refunded',
                     refundAmount,
+                    cancelledAt: new Date().toISOString(),
                });
-          } catch (err) {
-               logger.error('Failed to publish refund notification for late payment', {
-                    bookingId: booking.id,
-                    error: err.message,
-               });
-          }
+          });
+
+          logger.info(`Refunded late payment for ${booking.status} booking ${booking.id}`, {
+               paymentOrderId: booking.paymentOrderId,
+               amount: refundAmount,
+          });
 
           return result;
 
@@ -514,24 +543,23 @@ const handlePaymentSuccess = async (paymentOrderId, gatewayPaymentId, amount) =>
           // Execute saga Step 3: Confirm seats in inventory
           await saga.executeConfirmSeats(booking, seatIds, booking.fromSeq, booking.toSeq); // --- SEGMENT BOOKING
 
-          // Final status update (version was already incremented by CAS above)
-          await prisma.booking.updateMany({
-               where: { id: booking.id, status: 'CONFIRMING' },
-               data: { status: 'CONFIRMED', version: { increment: 1 } },
-          });
+          // Enrich BEFORE opening the transaction — these are HTTP calls.
+          const { userInfo, fromStationName, toStationName } =
+               await fetchBookingEnrichment(booking, { withStations: true });
 
-          // Release Redis locks (segment-aware)
-          await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
+          // B1: the CONFIRMED transition and the ticket notification commit together.
+          // Previously the publish sat outside, and its failure handler logged
+          // "CRITICAL: ... may be stale" — a paid, confirmed booking whose owner
+          // never got a ticket and nothing to replay from.
+          const confirmed = await prisma.$transaction(async (tx) => {
+               const result = await tx.booking.updateMany({
+                    where: { id: booking.id, status: 'CONFIRMING' },
+                    data: { status: 'CONFIRMED', version: { increment: 1 } },
+               });
 
-          // Publish BOOKING_CONFIRMED (retried by producer — log but don't fail the booking)
-          try {
-               const [userInfo, fromStationName, toStationName] = await Promise.all([
-                    fetchUserForNotification(booking.userId),
-                    fetchStationName(booking.fromStationId),
-                    fetchStationName(booking.toStationId),
-               ]);
+               if (result.count === 0) return false;
 
-               await bookingProducer.publishBookingConfirmed({
+               await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_CONFIRMED, booking.id, {
                     bookingId: booking.id,
                     userId: booking.userId,
                     email: userInfo.email,
@@ -553,13 +581,19 @@ const handlePaymentSuccess = async (paymentOrderId, gatewayPaymentId, amount) =>
                          gender: p.gender,
                     })),
                     totalAmount: booking.totalAmount,
+                    confirmedAt: new Date().toISOString(),
                });
-          } catch (err) {
-               logger.error('CRITICAL: Failed to publish BOOKING_CONFIRMED after retries — notification/search may be stale', {
-                    bookingId: booking.id,
-                    error: err.message,
-               });
+
+               return true;
+          });
+
+          if (!confirmed) {
+               logger.info(`Booking ${booking.id} left CONFIRMING before we could finalise — another process owns it`);
+               return;
           }
+
+          // Release Redis locks (segment-aware)
+          await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
 
           logger.info(`Booking ${booking.id} confirmed successfully`);
 
@@ -588,30 +622,32 @@ const handlePaymentSuccess = async (paymentOrderId, gatewayPaymentId, amount) =>
           // Compensate: refund payment and release seats
           await saga.compensateAll(booking, seatIds);
 
-          await prisma.booking.updateMany({
-               where: { id: booking.id, status: { in: ['PAYMENT_PENDING', 'CONFIRMING'] } },
-               data: {
-                    status: 'FAILED',
-                    failureReason: `confirm_failed: ${error.message}`,
-                    version: { increment: 1 },
-               },
-          });
+          const { userInfo } = await fetchBookingEnrichment(booking);
 
-          await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
+          await prisma.$transaction(async (tx) => {
+               const result = await tx.booking.updateMany({
+                    where: { id: booking.id, status: { in: ['PAYMENT_PENDING', 'CONFIRMING'] } },
+                    data: {
+                         status: 'FAILED',
+                         failureReason: `confirm_failed: ${error.message}`,
+                         version: { increment: 1 },
+                    },
+               });
 
-          try {
-               const userInfo = await fetchUserForNotification(booking.userId);
-               await bookingProducer.publishBookingFailed({
+               if (result.count === 0) return;
+
+               await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_FAILED, booking.id, {
                     bookingId: booking.id,
                     userId: booking.userId,
                     email: userInfo.email,
                     firstName: userInfo.firstName,
                     scheduleId: booking.scheduleId,
                     reason: 'confirm_seats_failed',
+                    failedAt: new Date().toISOString(),
                });
-          } catch (err) {
-               logger.error('Failed to publish BOOKING_FAILED after retries', { bookingId: booking.id, error: err.message });
-          }
+          });
+
+          await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
      }
 };
 
@@ -641,18 +677,39 @@ const handlePaymentFailure = async (paymentOrderId, reason) => {
 
      const seatIds = booking.seats.map(s => s.seatId).sort();
 
-     // Atomically claim this booking before compensating
-     try {
-          await casUpdateBooking(booking.id, booking.version, {
-               status: 'FAILED',
-               failureReason: reason || 'payment_failed',
+     // Enrich before claiming, so the notification can be enqueued in the same
+     // transaction as the status change (HTTP inside a transaction is never OK).
+     const { userInfo } = await fetchBookingEnrichment(booking);
+
+     // Atomically claim this booking AND record the notification, before compensating.
+     const claimed = await prisma.$transaction(async (tx) => {
+          const result = await tx.booking.updateMany({
+               where: { id: booking.id, version: booking.version },
+               data: {
+                    status: 'FAILED',
+                    failureReason: reason || 'payment_failed',
+                    version: { increment: 1 },
+               },
           });
-     } catch (error) {
-          if (error.code === 'STALE_STATE') {
-               logger.info(`Booking ${booking.id} already handled by another process, skipping`);
-               return;
-          }
-          throw error;
+
+          if (result.count === 0) return false;
+
+          await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_FAILED, booking.id, {
+               bookingId: booking.id,
+               userId: booking.userId,
+               email: userInfo.email,
+               firstName: userInfo.firstName,
+               scheduleId: booking.scheduleId,
+               reason: reason || 'payment_failed',
+               failedAt: new Date().toISOString(),
+          });
+
+          return true;
+     });
+
+     if (!claimed) {
+          logger.info(`Booking ${booking.id} already handled by another process, skipping`);
+          return;
      }
 
      // Compensate: release held seats
@@ -660,21 +717,6 @@ const handlePaymentFailure = async (paymentOrderId, reason) => {
 
      // Release Redis locks (segment-aware)
      await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
-
-     // Publish BOOKING_FAILED
-     try {
-          const userInfo = await fetchUserForNotification(booking.userId);
-          await bookingProducer.publishBookingFailed({
-               bookingId: booking.id,
-               userId: booking.userId,
-               email: userInfo.email,
-               firstName: userInfo.firstName,
-               scheduleId: booking.scheduleId,
-               reason: reason || 'payment_failed',
-          });
-     } catch (err) {
-          logger.error('Failed to publish BOOKING_FAILED after retries', { bookingId: booking.id, error: err.message });
-     }
 
      logger.info(`Booking ${booking.id} failed: ${reason}`);
 };
@@ -771,22 +813,23 @@ const cancelBooking = async (bookingId, userId) => {
           }
      }
 
-     // Final status (CANCELLING → CANCELLED)
-     await prisma.booking.updateMany({
-          where: { id: booking.id, status: 'CANCELLING' },
-          data: {
-               status: 'CANCELLED',
-               version: { increment: 1 },
-          },
-     });
+     const { userInfo } = await fetchBookingEnrichment(booking);
 
-     // Release Redis locks (segment-aware)
-     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
+     // Final status (CANCELLING → CANCELLED) and the cancellation notice commit
+     // together — the notice carries the refund amount, which is the only
+     // confirmation the user gets that their money is on the way back.
+     await prisma.$transaction(async (tx) => {
+          const result = await tx.booking.updateMany({
+               where: { id: booking.id, status: 'CANCELLING' },
+               data: {
+                    status: 'CANCELLED',
+                    version: { increment: 1 },
+               },
+          });
 
-     // Publish BOOKING_CANCELLED
-     try {
-          const userInfo = await fetchUserForNotification(booking.userId);
-          await bookingProducer.publishBookingCancelled({
+          if (result.count === 0) return;
+
+          await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_CANCELLED, booking.id, {
                bookingId: booking.id,
                userId: booking.userId,
                email: userInfo.email,
@@ -794,10 +837,12 @@ const cancelBooking = async (bookingId, userId) => {
                scheduleId: booking.scheduleId,
                reason: 'user_cancelled',
                refundAmount: refundInitiated ? booking.totalAmount : 0,
+               cancelledAt: new Date().toISOString(),
           });
-     } catch (err) {
-          logger.error('Failed to publish BOOKING_CANCELLED after retries', { bookingId: booking.id, error: err.message });
-     }
+     });
+
+     // Release Redis locks (segment-aware)
+     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
 
      logger.info(`Booking ${booking.id} cancelled by user ${userId}`);
 
@@ -1031,10 +1076,13 @@ const handleScheduleCancelled = async (scheduleId) => {
                     }
                }
 
-               // Publish BOOKING_CANCELLED event
-               try {
-                    const userInfo = await fetchUserForNotification(booking.userId);
-                    await bookingProducer.publishBookingCancelled({
+               // Queue BOOKING_CANCELLED. The status change committed above (it had to,
+               // to claim the booking), so this is enqueued on its own — durable and
+               // retried by the relay, rather than lost if Kafka is down. A mass
+               // schedule cancellation is exactly when the user MUST be told.
+               const { userInfo } = await fetchBookingEnrichment(booking);
+               await prisma.$transaction(async (tx) => {
+                    await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_CANCELLED, booking.id, {
                          bookingId: booking.id,
                          userId: booking.userId,
                          email: userInfo.email,
@@ -1042,13 +1090,9 @@ const handleScheduleCancelled = async (scheduleId) => {
                          scheduleId: booking.scheduleId,
                          reason: 'schedule_cancelled',
                          refundAmount: booking.status === 'CONFIRMED' ? booking.totalAmount : 0,
+                         cancelledAt: new Date().toISOString(),
                     });
-               } catch (err) {
-                    logger.error('Failed to publish BOOKING_CANCELLED for schedule cancellation', {
-                         bookingId: booking.id,
-                         error: err.message,
-                    });
-               }
+               });
 
                logger.info(`Booking ${booking.id} cancelled due to schedule cancellation`);
           } catch (error) {
@@ -1099,23 +1143,18 @@ const recoverConfirming = async (booking, seatIds) => {
      }
 
      if (seatsConfirmed) {
-          const finished = await prisma.booking.updateMany({
-               where: { id: booking.id, status: 'CONFIRMING' },
-               data: { status: 'CONFIRMED', version: { increment: 1 } },
-          });
+          const { userInfo, fromStationName, toStationName } =
+               await fetchBookingEnrichment(booking, { withStations: true });
 
-          if (finished.count === 0) return; // someone else finished it first
+          const finished = await prisma.$transaction(async (tx) => {
+               const result = await tx.booking.updateMany({
+                    where: { id: booking.id, status: 'CONFIRMING' },
+                    data: { status: 'CONFIRMED', version: { increment: 1 } },
+               });
 
-          await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
+               if (result.count === 0) return false; // someone else finished it first
 
-          try {
-               const [userInfo, fromStationName, toStationName] = await Promise.all([
-                    fetchUserForNotification(booking.userId),
-                    fetchStationName(booking.fromStationId),
-                    fetchStationName(booking.toStationId),
-               ]);
-
-               await bookingProducer.publishBookingConfirmed({
+               await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_CONFIRMED, booking.id, {
                     bookingId: booking.id,
                     userId: booking.userId,
                     email: userInfo.email,
@@ -1132,13 +1171,15 @@ const recoverConfirming = async (booking, seatIds) => {
                          price: s.price,
                     })),
                     totalAmount: booking.totalAmount,
+                    confirmedAt: new Date().toISOString(),
                });
-          } catch (err) {
-               logger.error('Recovery: failed to publish BOOKING_CONFIRMED', {
-                    bookingId: booking.id,
-                    error: err.message,
-               });
-          }
+
+               return true;
+          });
+
+          if (!finished) return;
+
+          await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
 
           logger.info(`Recovered stuck CONFIRMING booking ${booking.id} → CONFIRMED`);
           return;
@@ -1147,33 +1188,32 @@ const recoverConfirming = async (booking, seatIds) => {
      // Could not confirm — roll the whole saga back, refunding the captured payment.
      await saga.compensateAll(booking, seatIds);
 
-     await prisma.booking.updateMany({
-          where: { id: booking.id, status: 'CONFIRMING' },
-          data: {
-               status: 'FAILED',
-               failureReason: 'stuck_confirming_recovered',
-               version: { increment: 1 },
-          },
-     });
+     const { userInfo } = await fetchBookingEnrichment(booking);
 
-     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
+     await prisma.$transaction(async (tx) => {
+          const result = await tx.booking.updateMany({
+               where: { id: booking.id, status: 'CONFIRMING' },
+               data: {
+                    status: 'FAILED',
+                    failureReason: 'stuck_confirming_recovered',
+                    version: { increment: 1 },
+               },
+          });
 
-     try {
-          const userInfo = await fetchUserForNotification(booking.userId);
-          await bookingProducer.publishBookingFailed({
+          if (result.count === 0) return;
+
+          await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_FAILED, booking.id, {
                bookingId: booking.id,
                userId: booking.userId,
                email: userInfo.email,
                firstName: userInfo.firstName,
                scheduleId: booking.scheduleId,
                reason: 'confirm_seats_failed',
+               failedAt: new Date().toISOString(),
           });
-     } catch (err) {
-          logger.error('Recovery: failed to publish BOOKING_FAILED', {
-               bookingId: booking.id,
-               error: err.message,
-          });
-     }
+     });
+
+     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
 
      logger.warn(`Recovered stuck CONFIRMING booking ${booking.id} → FAILED (compensated)`);
 };
@@ -1217,18 +1257,17 @@ const recoverCancelling = async (booking, seatIds) => {
           return;
      }
 
-     const finished = await prisma.booking.updateMany({
-          where: { id: booking.id, status: 'CANCELLING' },
-          data: { status: 'CANCELLED', version: { increment: 1 } },
-     });
+     const { userInfo } = await fetchBookingEnrichment(booking);
 
-     if (finished.count === 0) return;
+     const finished = await prisma.$transaction(async (tx) => {
+          const result = await tx.booking.updateMany({
+               where: { id: booking.id, status: 'CANCELLING' },
+               data: { status: 'CANCELLED', version: { increment: 1 } },
+          });
 
-     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
+          if (result.count === 0) return false;
 
-     try {
-          const userInfo = await fetchUserForNotification(booking.userId);
-          await bookingProducer.publishBookingCancelled({
+          await enqueueBookingEvent(tx, KAFKA_TOPICS.BOOKING_CANCELLED, booking.id, {
                bookingId: booking.id,
                userId: booking.userId,
                email: userInfo.email,
@@ -1236,13 +1275,15 @@ const recoverCancelling = async (booking, seatIds) => {
                scheduleId: booking.scheduleId,
                reason: 'user_cancelled',
                refundAmount: refundInitiated ? booking.totalAmount : 0,
+               cancelledAt: new Date().toISOString(),
           });
-     } catch (err) {
-          logger.error('Recovery: failed to publish BOOKING_CANCELLED', {
-               bookingId: booking.id,
-               error: err.message,
-          });
-     }
+
+          return true;
+     });
+
+     if (!finished) return;
+
+     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
 
      logger.info(`Recovered stuck CANCELLING booking ${booking.id} → CANCELLED`);
 };

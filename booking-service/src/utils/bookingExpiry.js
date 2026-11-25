@@ -1,12 +1,13 @@
 const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { config } = require('../config');
-const { redis } = require('../config/redis');
+const { createLeaderElection } = require('../../../shared/utils/leaderElection');
 const { forceReleaseSeatLocks } = require('./distributedLock');
 const { compensateAll } = require('../services/saga.service');
 const { userClient } = require('../services/userClient');
 const bookingService = require('../services/booking.service');
-const bookingProducer = require('../kafka/producer/booking.producer');
+const outbox = require('./outbox');
+const { KAFKA_TOPICS } = require('../../../shared/constants/kafka-topics');
 
 const fetchUserForNotification = async (userId) => {
      try {
@@ -23,24 +24,24 @@ const fetchUserForNotification = async (userId) => {
 
 let expiryInterval = null;
 
-// Redis-based leader election key. Only one instance holds this lock at a time.
-const LEADER_KEY = 'booking:expiry-job:leader';
-const LEADER_TTL_SECONDS = 25; // shorter than interval so it re-acquires each cycle
-
-/**
- * Try to become the leader for this expiry cycle using Redis SET NX EX.
- * Returns true if this instance acquired the lock.
- */
-async function tryAcquireLeadership() {
-     try {
-          const result = await redis.set(LEADER_KEY, process.pid.toString(), 'NX', 'EX', LEADER_TTL_SECONDS);
-          return result === 'OK';
-     } catch (err) {
-          // If Redis is down, skip this cycle rather than having all instances run
-          logger.error('Failed to acquire expiry job leadership', { error: err.message });
-          return false;
-     }
-}
+// B3: leader election now lives in Postgres, not Redis.
+//
+// The old Redis SET NX had an outage failure mode that was exactly backwards: if
+// Redis was unreachable, tryAcquire returned false for EVERY instance, so nobody
+// ran the job. Expired bookings then accumulated with their seats held — and the
+// expiry job is precisely the thing that recovers them. A Redis blip silently
+// disabled the system's own repair mechanism.
+//
+// The lease lives in the same database as the bookings being expired, so it can't
+// be unavailable while there is still work to do. It also renews itself during a
+// long cycle, which the fixed 25s TTL could not (that TTL was shorter than the
+// 30s interval, and a slow cycle could lose the lock mid-run to a second instance).
+const leaderElection = createLeaderElection({
+     prisma,
+     logger,
+     name: 'booking:expiry-job',
+     leaseSeconds: 60,
+});
 
 /**
  * Background job that expires stale bookings.
@@ -57,12 +58,17 @@ async function cleanExpiredBookings() {
      // Leader election happens once per cycle in runExpiryCycle, which drives both
      // this pass and the stuck-booking recovery pass.
      try {
+          // Bounded: after an outage this table can hold a very large backlog, and
+          // an unbounded findMany would pull all of it (with seats) into memory and
+          // then process it serially inside a single tick.
           const expiredBookings = await prisma.booking.findMany({
                where: {
                     status: { in: ['PENDING', 'SEATS_HELD', 'PAYMENT_PENDING'] },
                     lockExpiresAt: { lt: new Date() },
                },
                include: { seats: true },
+               orderBy: { lockExpiresAt: 'asc' },
+               take: config.EXPIRY_JOB_BATCH_SIZE,
           });
 
           if (expiredBookings.length === 0) return;
@@ -73,22 +79,46 @@ async function cleanExpiredBookings() {
                try {
                     const seatIds = booking.seats.map(s => s.seatId).sort();
 
-                    // Atomically claim this booking via optimistic lock (CAS).
-                    // If payment webhook or user cancel already changed the version, skip it.
-                    const claimed = await prisma.booking.updateMany({
-                         where: {
-                              id: booking.id,
-                              version: booking.version,
-                              status: { in: ['PENDING', 'SEATS_HELD', 'PAYMENT_PENDING'] },
-                         },
-                         data: {
-                              status: 'EXPIRED',
-                              failureReason: 'booking_timeout',
-                              version: { increment: 1 },
-                         },
+                    // Enrich before the transaction — HTTP must not run inside one.
+                    const userInfo = await fetchUserForNotification(booking.userId);
+
+                    // B1: atomically claim this booking via optimistic lock (CAS) AND
+                    // record the notification. If the payment webhook or a user cancel
+                    // already changed the version, we lose the CAS and emit nothing.
+                    const claimed = await prisma.$transaction(async (tx) => {
+                         const result = await tx.booking.updateMany({
+                              where: {
+                                   id: booking.id,
+                                   version: booking.version,
+                                   status: { in: ['PENDING', 'SEATS_HELD', 'PAYMENT_PENDING'] },
+                              },
+                              data: {
+                                   status: 'EXPIRED',
+                                   failureReason: 'booking_timeout',
+                                   version: { increment: 1 },
+                              },
+                         });
+
+                         if (result.count === 0) return false;
+
+                         await outbox.enqueue(tx, {
+                              topic: KAFKA_TOPICS.BOOKING_FAILED,
+                              key: `booking-${booking.id}`,
+                              payload: {
+                                   bookingId: booking.id,
+                                   userId: booking.userId,
+                                   email: userInfo.email,
+                                   firstName: userInfo.firstName,
+                                   scheduleId: booking.scheduleId,
+                                   reason: 'booking_timeout',
+                                   failedAt: new Date().toISOString(),
+                              },
+                         });
+
+                         return true;
                     });
 
-                    if (claimed.count === 0) {
+                    if (!claimed) {
                          logger.info(`Booking ${booking.id} already handled by another process, skipping expiry`);
                          continue;
                     }
@@ -98,24 +128,6 @@ async function cleanExpiredBookings() {
 
                     // Release Redis locks (segment-aware)
                     await forceReleaseSeatLocks(booking.scheduleId, seatIds, booking.fromSeq, booking.toSeq);
-
-                    // Publish BOOKING_FAILED
-                    try {
-                         const userInfo = await fetchUserForNotification(booking.userId);
-                         await bookingProducer.publishBookingFailed({
-                              bookingId: booking.id,
-                              userId: booking.userId,
-                              email: userInfo.email,
-                              firstName: userInfo.firstName,
-                              scheduleId: booking.scheduleId,
-                              reason: 'booking_timeout',
-                         });
-                    } catch (err) {
-                         logger.error('Failed to publish BOOKING_FAILED for expired booking', {
-                              bookingId: booking.id,
-                              error: err.message,
-                         });
-                    }
 
                     logger.info(`Expired booking ${booking.id} cleaned up`, {
                          previousStatus: booking.status,
@@ -150,6 +162,8 @@ async function recoverStuckBookings() {
                updatedAt: { lt: cutoff },
           },
           include: { seats: true },
+          orderBy: { updatedAt: 'asc' },
+          take: config.EXPIRY_JOB_BATCH_SIZE,
      });
 
      if (stuck.length === 0) return;
@@ -168,21 +182,41 @@ async function recoverStuckBookings() {
      }
 }
 
+// Guards against overlapping cycles: a backlog can make one cycle outlast the
+// interval, and setInterval would otherwise start a second on top of it.
+let cycleInFlight = null;
+
 async function runExpiryCycle() {
-     // Leader election covers both passes: one instance per cycle.
-     const isLeader = await tryAcquireLeadership();
-     if (!isLeader) {
-          logger.debug('Skipping expiry job — another instance is the leader');
-          return;
+     if (cycleInFlight) {
+          logger.warn('Previous expiry cycle still running — skipping this tick');
+          return cycleInFlight;
      }
 
-     await cleanExpiredBookings();
+     cycleInFlight = (async () => {
+          try {
+               // One lease covers both passes, renewed automatically for long cycles.
+               await leaderElection.withLeadership(async () => {
+                    await cleanExpiredBookings();
 
-     try {
-          await recoverStuckBookings();
-     } catch (error) {
-          logger.error('Error in stuck-booking recovery pass', { error: error.message });
-     }
+                    try {
+                         await recoverStuckBookings();
+                    } catch (error) {
+                         logger.error('Error in stuck-booking recovery pass', { error: error.message });
+                    }
+               });
+          } catch (error) {
+               logger.error('Expiry cycle failed', { error: error.message });
+          } finally {
+               cycleInFlight = null;
+          }
+     })();
+
+     return cycleInFlight;
+}
+
+/** Awaited during shutdown so we never exit mid-compensation. */
+function currentCycle() {
+     return cycleInFlight;
 }
 
 function startBookingExpiryJob() {
@@ -197,12 +231,30 @@ function startBookingExpiryJob() {
      );
 }
 
-function stopBookingExpiryJob() {
+/**
+ * Stop scheduling new cycles and wait for any in-flight one to finish.
+ *
+ * B7: previously this only cleared the interval. A SIGTERM arriving mid-cycle left
+ * a saga half-compensated — seats released but the booking never marked, or a
+ * refund initiated with nothing recorded — and A7's sweeper would have to untangle
+ * it later. Awaiting the cycle means shutdown lands on a clean boundary.
+ */
+async function stopBookingExpiryJob() {
      if (expiryInterval) {
           clearInterval(expiryInterval);
           expiryInterval = null;
-          logger.info('Booking expiry job stopped');
+          logger.info('Booking expiry job stopped accepting new cycles');
+     }
+
+     if (cycleInFlight) {
+          logger.info('Waiting for in-flight expiry cycle to finish...');
+          try {
+               await cycleInFlight;
+          } catch {
+               // already logged inside the cycle
+          }
+          logger.info('In-flight expiry cycle finished');
      }
 }
 
-module.exports = { startBookingExpiryJob, stopBookingExpiryJob };
+module.exports = { startBookingExpiryJob, stopBookingExpiryJob, currentCycle };

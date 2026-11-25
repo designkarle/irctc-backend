@@ -35,18 +35,38 @@ const connectProducer = async () => {
      }
 };
 
-// Graceful shutdown
-const shutdown = async () => {
-     logger.info('Shutting down Kafka connections...');
+// B7: this module used to register its own SIGTERM/SIGINT handlers that called
+// process.exit(0) immediately after disconnecting — killing the process without
+// letting any in-flight eachMessage handler finish, and racing whatever else the
+// service still had to clean up. Shutdown ordering now belongs to index.js; this
+// module just exposes the teardown primitives.
+
+/** Stops consuming and waits for in-flight message handlers to settle. */
+const disconnectConsumer = async () => {
      await consumer.disconnect();
+     logger.info('Kafka consumer disconnected');
+};
+
+const disconnectProducer = async () => {
      if (isProducerConnected) {
           await producer.disconnect();
           isProducerConnected = false;
+          logger.info('Kafka producer disconnected (DLQ)');
      }
-     process.exit(0);
 };
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+/** Consumer first — its handlers may still need the producer for DLQ publishing. */
+const disconnectAll = async () => {
+     await disconnectConsumer();
+     await disconnectProducer();
+};
 
-module.exports = { kafka, consumer, producer, connectProducer };
+module.exports = {
+     kafka,
+     consumer,
+     producer,
+     connectProducer,
+     disconnectConsumer,
+     disconnectProducer,
+     disconnectAll,
+};

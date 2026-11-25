@@ -1,44 +1,30 @@
 const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { config } = require('../config');
+const { createLeaderElection } = require('../../../shared/utils/leaderElection');
 const { recountAndPublish, recomputeSegmentSeatStatuses } = require('../services/inventory.service');
 
 let intervalHandle = null;
 
-// PostgreSQL advisory lock ID for leader election.
-// Only one instance holds this lock at a time (try-lock, non-blocking).
-const ADVISORY_LOCK_ID = 800001;
+// B3: replaces pg_try_advisory_lock(800001).
+//
+// Advisory locks are SESSION scoped, but Prisma pools connections — so acquire and
+// release could run on different pooled sessions. The unlock would then target a
+// session that doesn't hold the lock (Postgres just warns and returns false) while
+// the real holder kept it until that connection was recycled. The job would be
+// permanently dead across every instance, and the only symptom would be expired
+// seat locks never being swept, i.e. seats quietly becoming unbookable.
+//
+// A lease row is a single atomic statement and is indifferent to which connection
+// executes it.
+const leaderElection = createLeaderElection({
+     prisma,
+     logger,
+     name: 'inventory:lock-expiry-job',
+     leaseSeconds: 120,
+});
 
-/**
- * Try to become the leader for this expiry cycle using pg_try_advisory_lock.
- * Returns true if this instance acquired the lock. The lock is session-level
- * and released explicitly after the job finishes.
- */
-async function tryAcquireLeadership() {
-     try {
-          const result = await prisma.$queryRaw`SELECT pg_try_advisory_lock(${ADVISORY_LOCK_ID}) AS acquired`;
-          return result[0].acquired === true;
-     } catch (err) {
-          logger.error('Failed to acquire lock expiry leadership', { error: err.message });
-          return false;
-     }
-}
-
-async function releaseLeadership() {
-     try {
-          await prisma.$queryRaw`SELECT pg_advisory_unlock(${ADVISORY_LOCK_ID})`;
-     } catch (err) {
-          logger.error('Failed to release lock expiry leadership', { error: err.message });
-     }
-}
-
-async function cleanExpiredLocks() {
-     const isLeader = await tryAcquireLeadership();
-     if (!isLeader) {
-          logger.debug('Skipping lock expiry job — another instance is the leader');
-          return;
-     }
-
+async function cleanExpiredLocksInner() {
      try {
           // --- SEGMENT BOOKING: Clean expired segment locks first ---
           try {
@@ -130,9 +116,30 @@ async function cleanExpiredLocks() {
           }
      } catch (error) {
           logger.error('Lock expiry cleanup failed', { error: error.message });
-     } finally {
-          await releaseLeadership();
      }
+}
+
+// Prevents overlapping cycles — a large backlog can make one cycle outlast the
+// interval, and setInterval would otherwise stack a second run on top of it.
+let cycleInFlight = null;
+
+async function cleanExpiredLocks() {
+     if (cycleInFlight) {
+          logger.warn('Previous lock expiry cycle still running — skipping this tick');
+          return cycleInFlight;
+     }
+
+     cycleInFlight = (async () => {
+          try {
+               await leaderElection.withLeadership(cleanExpiredLocksInner);
+          } catch (error) {
+               logger.error('Lock expiry cycle failed', { error: error.message });
+          } finally {
+               cycleInFlight = null;
+          }
+     })();
+
+     return cycleInFlight;
 }
 
 function startLockExpiryJob() {
@@ -143,11 +150,26 @@ function startLockExpiryJob() {
      logger.info(`Lock expiry job started (interval: ${config.LOCK_EXPIRY_INTERVAL_MS}ms)`);
 }
 
-function stopLockExpiryJob() {
+/**
+ * Stop scheduling new cycles and wait for any in-flight one.
+ * B7: exiting mid-cycle could leave segment locks deleted but seat statuses not
+ * yet recomputed, so the aggregate counts would be wrong until the next sweep.
+ */
+async function stopLockExpiryJob() {
      if (intervalHandle) {
           clearInterval(intervalHandle);
           intervalHandle = null;
-          logger.info('Lock expiry job stopped');
+          logger.info('Lock expiry job stopped accepting new cycles');
+     }
+
+     if (cycleInFlight) {
+          logger.info('Waiting for in-flight lock expiry cycle to finish...');
+          try {
+               await cycleInFlight;
+          } catch {
+               // already logged inside the cycle
+          }
+          logger.info('In-flight lock expiry cycle finished');
      }
 }
 
