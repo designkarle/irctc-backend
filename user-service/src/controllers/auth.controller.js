@@ -2,7 +2,7 @@ const { BadRequestError, UnauthorizedError } = require("../utils/error");
 const asyncHandler = require('../utils/asyncHandler');
 const {config} = require('../config');
 const authService = require('../services/auth.service');
-const getDeviceFingerprint = require("../utils/deviceFingerPrint");
+const getDeviceFingerprint = require("../utils/deviceFingerprint");
 
 const isProd = process.env.NODE_ENV === 'production';
 
